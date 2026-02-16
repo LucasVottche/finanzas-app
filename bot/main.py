@@ -18,7 +18,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 # Usamos SERVICE_ROLE_KEY para que el bot tenga permisos de escritura totales
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_SECRET") 
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_SECRET")
 # Tu ID numérico de Telegram por seguridad (opcional pero recomendado)
 ALLOWED_USER_ID = os.environ.get("ALLOWED_USER_ID")
 
