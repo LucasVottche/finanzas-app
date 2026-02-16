@@ -18,15 +18,17 @@ def check_password():
     if st.session_state.password_correct:
         return True
 
-    st.title("🔐 Acceso Seguro")
-    pwd = st.text_input("Contraseña", type="password")
-    if st.button("Entrar"):
-        # CAMBIA ESTA CONTRASEÑA POR LA QUE QUIERAS
-        if pwd == "admin": 
-            st.session_state.password_correct = True
-            st.rerun()
-        else:
-            st.error("Contraseña incorrecta")
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+        st.title("🔐 Acceso Seguro")
+        pwd = st.text_input("Contraseña", type="password")
+        if st.button("Entrar"):
+            # CAMBIA ESTA CONTRASEÑA POR LA QUE QUIERAS
+            if pwd == "admin": 
+                st.session_state.password_correct = True
+                st.rerun()
+            else:
+                st.error("Contraseña incorrecta")
     return False
 
 if not check_password():
@@ -186,7 +188,6 @@ elif menu == "📅 Calendario":
     if not df_cal.empty:
         df_cal = df_cal[(df_cal['fecha'] >= f_ini) & (df_cal['fecha'] <= f_fin)]
     
-    # Crear Calendario Visual
     cal = calendar.Calendar()
     semanas = cal.monthdayscalendar(anio_sel, mes_sel)
     dias_semana = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
@@ -203,7 +204,6 @@ elif menu == "📅 Calendario":
                     fecha_dia = date(anio_sel, mes_sel, dia)
                     st.write(f"**{dia}**")
                     if not df_cal.empty:
-                        # Filtrar eventos del día
                         evs = df_cal[df_cal['fecha'] == fecha_dia]
                         ing = evs[evs['tipo']=='INGRESO']['monto'].sum()
                         gas = evs[evs['tipo']!='INGRESO']['monto'].sum()
@@ -272,7 +272,6 @@ elif menu == "➕ Cargar":
             d = st.text_input("Descripción")
             
             c3, c4 = st.columns(2)
-            # Lógica dinámica de cuentas
             if tipo_op == "Pagar Tarjeta":
                 cta_n = c3.selectbox("Desde", df_cta[df_cta['tipo']!='CREDITO']['nombre'].tolist())
                 cta_dest = c4.selectbox("Tarjeta", df_cta[df_cta['tipo']=='CREDITO']['nombre'].tolist())
@@ -281,7 +280,6 @@ elif menu == "➕ Cargar":
                 cta_n = c3.selectbox("Cuenta", df_cta['nombre'].tolist())
                 cat_n = c4.selectbox("Categoría", df_cat['nombre'].tolist())
             
-            # GESTIÓN DE CUOTAS
             cuotas = 1
             if tipo_op == "Gasto":
                 cuotas = st.number_input("Cantidad de Cuotas", min_value=1, value=1, step=1)
@@ -299,8 +297,11 @@ elif menu == "➕ Cargar":
                 elif tipo_op == "Ingreso":
                     db_save(f, m, d, id_c, id_ct, "INGRESO")
                 
-                else: # Gasto con o sin cuotas
-                    tp = "COMPRA_TARJETA" if df_cta[df_cta['nombre'] == cta_n]['tipo'] == 'CREDITO' else "GASTO"
+                else: 
+                    # --- CORRECCIÓN BUG 1: .values[0] ---
+                    es_credito = df_cta[df_cta['nombre'] == cta_n]['tipo'].values[0] == 'CREDITO'
+                    tp = "COMPRA_TARJETA" if es_credito else "GASTO"
+                    
                     if cuotas > 1:
                         m_cuota = m / cuotas
                         for i in range(cuotas):
@@ -423,7 +424,11 @@ elif menu == "⚙️ Ajustes":
             if st.form_submit_button("Agregar Fijo"):
                 sidc = df_cta[df_cta['nombre']==sc]['id'].values[0]
                 sidca = df_cat[df_cat['nombre']==sca]['id'].values[0]
-                stipo = "COMPRA_TARJETA" if df_cta[df_cta['nombre']==sc]['tipo']=='CREDITO' else "GASTO"
+                
+                # --- CORRECCIÓN BUG 2: .values[0] ---
+                es_cred = df_cta[df_cta['nombre']==sc]['tipo'].values[0] == 'CREDITO'
+                stipo = "COMPRA_TARJETA" if es_cred else "GASTO"
+                
                 save_suscripcion(sd, sm, sidc, sidca, stipo)
                 st.success("Agregado"); st.rerun()
         
