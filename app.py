@@ -72,6 +72,9 @@ def db_save(fecha, monto, desc, cta_id, cat_id, tipo, dest_id=None):
     if dest_id: payload["cuenta_destino_id"] = dest_id
     supabase.table("movimientos").insert(payload).execute()
 
+def db_delete(id_mov):
+    supabase.table("movimientos").delete().eq("id", id_mov).execute()
+
 # --- CARGA ---
 df_cta, df_cat, sueldo_base = get_maestros()
 
@@ -93,65 +96,65 @@ if menu == "📊 Dashboard":
     if not df_raw.empty:
         df_mes = df_raw[(df_raw['fecha'] >= f_ini) & (df_raw['fecha'] <= f_fin)]
         
-        # --- LÓGICA DE INGRESOS (Evita duplicados) ---
+        # --- LÓGICA DE INGRESOS ---
         ingresos_registrados = df_mes[df_mes['tipo'] == 'INGRESO']['monto'].sum()
-        # Si ya cargaste un sueldo, el total es ese. Si no cargaste nada, usamos el de Ajustes.
         total_ingresos = ingresos_registrados if ingresos_registrados > 0 else sueldo_base
         
         # --- GASTOS ---
         gastos_cash = df_mes[df_mes['tipo'] == 'GASTO']['monto'].sum()
-        consumos_tarjeta_mes = df_mes[df_mes['tipo'] == 'COMPRA_TARJETA']['monto'].sum()
+        consumos_tj_mes = df_mes[df_mes['tipo'] == 'COMPRA_TARJETA']['monto'].sum()
         
-        # --- VENCIMIENTOS DE TARJETA (Lo que pagás hoy de consumos viejos) ---
+        # --- VENCIMIENTOS TARJETA ---
         df_tj = df_raw[df_raw['tipo'] == 'COMPRA_TARJETA'].copy()
-        vence_ahora_monto = 0
+        vence_ahora = 0
         if not df_tj.empty:
             df_tj['fecha_vto'] = df_tj.apply(lambda x: calcular_vto_real(x['fecha'], x['cierre'], x['vto']), axis=1)
-            vence_ahora = df_tj[(df_tj['fecha_vto'] >= f_ini) & (df_tj['fecha_vto'] <= f_fin)]
-            vence_ahora_monto = vence_ahora['monto'].sum()
+            vence_ahora_df = df_tj[(df_tj['fecha_vto'] >= f_ini) & (df_tj['fecha_vto'] <= f_fin)]
+            vence_ahora = vence_ahora_df['monto'].sum()
 
-        disponible = total_ingresos - gastos_cash - vence_ahora_monto
+        disponible = total_ingresos - gastos_cash - vence_ahora
 
         c1, c2, c3 = st.columns(3)
         with c1:
             with st.container(border=True):
-                st.metric("✅ Disponible (Caja)", fmt_ars(disponible), help="Lo que te queda en el bolsillo este mes")
+                st.metric("✅ Disponible (Caja)", fmt_ars(disponible))
                 st.caption(f"Ingresos: {fmt_ars(total_ingresos)}")
         with c2:
             with st.container(border=True):
-                st.metric("💳 Vencen este mes", fmt_ars(vence_ahora_monto), help="Consumos de meses anteriores que pagás hoy")
+                st.metric("💳 Vencen este mes", fmt_ars(vence_ahora))
         with c3:
             with st.container(border=True):
-                st.metric("🛒 Consumo Total", fmt_ars(gastos_cash + consumos_tarjeta_mes), help="Todo lo que gastaste en el mes (Cash + Tarjeta)")
+                st.metric("🛒 Consumo Total", fmt_ars(gastos_cash + consumos_tj_mes))
 
         st.divider()
         col_g1, col_g2 = st.columns([2, 1])
         with col_g1:
-            st.subheader("Flujo de Movimientos")
-            df_bar = df_mes[df_mes['tipo'] != 'INGRESO']
-            if not df_bar.empty:
-                fig = px.bar(df_bar, x='fecha', y='monto', color='categoria', barmode='group')
+            st.subheader("Flujo")
+            if not df_mes.empty:
+                fig = px.bar(df_mes[df_mes['tipo'] != 'INGRESO'], x='fecha', y='monto', color='categoria')
                 st.plotly_chart(fig, use_container_width=True)
         with col_g2:
-            st.subheader("Gastos por Rubro")
-            df_pie = df_mes[df_mes['tipo'].isin(['GASTO', 'COMPRA_TARJETA'])]
-            if not df_pie.empty:
-                fig_pie = px.pie(df_pie, values='monto', names='categoria', hole=0.5)
-                st.plotly_chart(fig_pie, use_container_width=True)
+            st.subheader("Rubros")
+            if not df_mes.empty:
+                fig_p = px.pie(df_mes[df_mes['tipo'].isin(['GASTO', 'COMPRA_TARJETA'])], values='monto', names='categoria', hole=0.5)
+                st.plotly_chart(fig_p, use_container_width=True)
     else:
-        st.info("No hay datos para este mes. Podés cargarlos en 'Planificador'.")
+        st.info("No hay datos.")
 
-# --- 3. PLANIFICADOR (Edición rápida) ---
+# --- 2. PLANIFICADOR ---
 elif menu == "📅 Planificador":
     st.title(f"Planear {f_ini.strftime('%B %Y')}")
-    st.info("Cargá tu sueldo y gastos fijos. Si los gastos son con Tarjeta, aparecerán como deuda en el Dashboard.")
     with st.container(border=True):
         ing = st.number_input("Sueldo Neto estimado", value=int(sueldo_base), step=1000)
         if 'plan_df' not in st.session_state:
-            st.session_state.plan_df = pd.DataFrame([{"Descripción": "Alquiler", "Monto": 0.0, "Categoría": df_cat['nombre'].tolist()[0], "Pago": df_cta['nombre'].tolist()[0]}])
+            st.session_state.plan_df = pd.DataFrame([{"Descripción": "Gasto fijo", "Monto": 0.0, "Categoría": df_cat['nombre'].tolist()[0], "Pago": df_cta['nombre'].tolist()[0]}])
+        
         ed = st.data_editor(st.session_state.plan_df, num_rows="dynamic", use_container_width=True,
-            column_config={"Categoría": st.column_config.SelectboxColumn(options=df_cat['nombre'].tolist()),
-                           "Pago": st.column_config.SelectboxColumn(options=df_cta['nombre'].tolist())})
+            column_config={
+                "Categoría": st.column_config.SelectboxColumn(options=df_cat['nombre'].tolist()),
+                "Pago": st.column_config.SelectboxColumn(options=df_cta['nombre'].tolist())
+            })
+        
         if st.button("Guardar Planificación", type="primary", use_container_width=True):
             id_mp = df_cta[df_cta['nombre'] == "Mercado Pago"]['id'].values[0]
             db_save(f_ini, ing, "Sueldo Planificado", id_mp, df_cat.iloc[0]['id'], "INGRESO")
@@ -162,26 +165,91 @@ elif menu == "📅 Planificador":
                     db_save(f_ini + timedelta(days=4), r['Monto'], r['Descripción'], c_id, df_cat[df_cat['nombre'] == r['Categoría']]['id'].values[0], tp)
             st.success("Plan guardado!"); time.sleep(1); st.rerun()
 
-# --- 4. HISTORIAL (Para borrar o editar el plan) ---
+# --- 3. CARGAR (MANUAL) ---
+elif menu == "➕ Cargar":
+    st.title("Nueva Operación Manual")
+    tipo_op = st.radio("Tipo", ["Gasto", "Ingreso", "Pagar Tarjeta"], horizontal=True)
+    
+    with st.container(border=True):
+        with st.form("f_manual"):
+            col1, col2 = st.columns(2)
+            f = col1.date_input("Fecha", date.today())
+            m = col2.number_input("Monto", min_value=0.0, step=100.0)
+            d = st.text_input("Descripción")
+            
+            c3, c4 = st.columns(2)
+            cta_n = c3.selectbox("Cuenta", df_cta['nombre'].tolist())
+            cat_n = c4.selectbox("Categoría", df_cat['nombre'].tolist())
+            
+            if st.form_submit_button("Guardar Movimiento", use_container_width=True):
+                id_c = df_cta[df_cta['nombre'] == cta_n]['id'].values[0]
+                id_ct = df_cat[df_cat['nombre'] == cat_n]['id'].values[0]
+                tp = "INGRESO" if tipo_op == "Ingreso" else ("COMPRA_TARJETA" if df_cta[df_cta['nombre'] == cta_n]['tipo'].values[0] == 'CREDITO' else "GASTO")
+                db_save(f, m, d, id_c, id_ct, tp)
+                st.success("¡Guardado!"); time.sleep(1); st.rerun()
+
+# --- 4. TARJETAS (NUEVO / REPARADO) ---
+elif menu == "💳 Tarjetas":
+    st.title("Gestión de Crédito")
+    tab1, tab2 = st.tabs(["⚙️ Configurar Fechas", "📥 Importar Resumen"])
+    
+    with tab1:
+        df_crd = df_cta[df_cta['tipo'] == 'CREDITO']
+        if df_crd.empty: st.info("No hay tarjetas de crédito.")
+        for _, r in df_crd.iterrows():
+            with st.container(border=True):
+                ca, cb, cc, cd = st.columns([2,1,1,1])
+                ca.write(f"### {r['nombre']}")
+                ci = cb.number_input("Cierre", 1, 31, int(r.get('dia_cierre') or 23), key=f"ci_{r['id']}")
+                vt = cc.number_input("Vto", 1, 31, int(r.get('dia_vencimiento') or 5), key=f"vt_{r['id']}")
+                if cd.button("Guardar", key=f"btn_{r['id']}", use_container_width=True):
+                    supabase.table("cuentas").update({"dia_cierre": ci, "dia_vencimiento": vt}).eq("id", r['id']).execute()
+                    st.success("Actualizado"); time.sleep(1); st.rerun()
+    
+    with tab2:
+        st.caption("Subí el resumen del banco para cargar consumos automáticamente.")
+        up = st.file_uploader("Archivo CSV o Excel", type=['csv', 'xlsx'])
+        if up:
+            df_up = pd.read_csv(up) if up.name.endswith('.csv') else pd.read_excel(up)
+            st.dataframe(df_up.head(3), use_container_width=True)
+            with st.form("f_import"):
+                sel = st.selectbox("Asignar a:", df_cta[df_cta['tipo'] == 'CREDITO']['nombre'].tolist())
+                c1, c2, c3 = st.columns(3)
+                f_c = c1.selectbox("Col. Fecha", df_up.columns)
+                d_c = c2.selectbox("Col. Desc", df_up.columns)
+                m_c = c3.selectbox("Col. Monto", df_up.columns)
+                if st.form_submit_button("Importar Todo", use_container_width=True):
+                    id_tj = df_cta[df_cta['nombre'] == sel]['id'].values[0]
+                    for _, row in df_up.iterrows():
+                        try:
+                            fecha_p = pd.to_datetime(row[f_c], dayfirst=True).date()
+                            monto_p = abs(float(str(row[m_c]).replace('$','').replace('.','').replace(',','.')))
+                            db_save(fecha_p, monto_p, str(row[d_c]), id_tj, df_cat.iloc[0]['id'], "COMPRA_TARJETA")
+                        except: pass
+                    st.success("¡Importación Exitosa!"); time.sleep(1); st.rerun()
+
+# --- 5. HISTORIAL ---
 elif menu == "📝 Historial":
-    st.title("Editar o Borrar Movimientos")
-    st.caption("Filtrá por el mes en la barra lateral para ver tu planificación de Marzo.")
+    st.title("Historial y Edición")
     df_h = get_movimientos(f_ini, f_fin)
     if not df_h.empty:
         df_h = df_h[(df_h['fecha'] >= f_ini) & (df_h['fecha'] <= f_fin)]
-        st.data_editor(df_h[['id', 'fecha', 'descripcion', 'monto', 'cuenta', 'categoria', 'tipo']], 
-                       use_container_width=True, hide_index=True, key="edit_hist")
-        if st.button("Guardar Cambios"):
-            st.toast("Cambios guardados en Supabase") # Aquí podés añadir la lógica de update si querés
+        # Agregamos opción de borrar
+        sel_del = st.selectbox("Borrar un movimiento (Selecciona descripción)", ["Seleccionar..."] + df_h['descripcion'].tolist())
+        if sel_del != "Seleccionar...":
+            id_del = df_h[df_h['descripcion'] == sel_del]['id'].values[0]
+            if st.button("Eliminar Permanentemente", type="primary"):
+                db_delete(id_del)
+                st.success("Borrado."); time.sleep(1); st.rerun()
+        
+        st.data_editor(df_h[['id', 'fecha', 'descripcion', 'monto', 'cuenta', 'categoria', 'tipo']], use_container_width=True, hide_index=True)
     else:
-        st.write("Sin movimientos en este periodo.")
+        st.info("Sin datos.")
 
-# (Resto de secciones iguales...)
 # --- 6. AJUSTES ---
 elif menu == "⚙️ Ajustes":
-    st.title("Configuración")
-    with st.container(border=True):
-        n_s = st.number_input("Sueldo Base Mensual", value=int(sueldo_base))
-        if st.button("Actualizar Sueldo", use_container_width=True):
-            supabase.table("configuracion").upsert({"clave": "sueldo_mensual", "valor": str(n_s)}).execute()
-            st.success("Ok"); time.sleep(1); st.rerun()
+    st.header("Configuración")
+    n_s = st.number_input("Sueldo Base (Ajustes)", value=int(sueldo_base))
+    if st.button("Actualizar Sueldo"):
+        supabase.table("configuracion").upsert({"clave": "sueldo_mensual", "valor": str(n_s)}).execute()
+        st.success("Ok!"); time.sleep(1); st.rerun()
