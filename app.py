@@ -7,7 +7,7 @@ import plotly.express as px
 import time
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Finanzas Pro", page_icon="💳", layout="wide")
+st.set_page_config(page_title="Finanzas Pro", page_icon="💰", layout="wide")
 
 # --- CONEXIÓN ---
 @st.cache_resource
@@ -24,7 +24,7 @@ supabase = init_connection()
 def fmt_ars(valor):
     if valor is None: valor = 0
     s = f"{valor:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-    return f"${s[:-3]}" if s.endswith(",00") else f"${s}"
+    return f"$ {s[:-3]}" if s.endswith(",00") else f"$ {s}"
 
 def calcular_vto_real(fecha_compra, dia_cierre, dia_vto):
     if isinstance(fecha_compra, str):
@@ -48,7 +48,7 @@ def get_maestros():
     return cta, cat, su
 
 def get_movimientos(desde, hasta):
-    desde_ext = desde - relativedelta(months=4)
+    desde_ext = desde - relativedelta(months=5)
     resp = supabase.table("movimientos").select(
         "*, categorias(nombre, icono), cuentas:cuentas!cuenta_id(nombre, tipo, dia_cierre, dia_vencimiento)"
     ).gte("fecha", str(desde_ext)).lte("fecha", str(hasta)).order("fecha").execute()
@@ -96,30 +96,39 @@ if menu == "📊 Dashboard":
     
     if not df_raw.empty:
         df_mes = df_raw[(df_raw['fecha'] >= f_ini) & (df_raw['fecha'] <= f_fin)]
+        
+        # INGRESOS
         ing_registrados = df_mes[df_mes['tipo'] == 'INGRESO']['monto'].sum()
         total_ingresos = ing_registrados if ing_registrados > 0 else sueldo_base
         
+        # GASTOS DEL MES (Consumo real: Gasto Cash + Compras Tarjeta hechas hoy)
         gastos_cash = df_mes[df_mes['tipo'] == 'GASTO']['monto'].sum()
+        gastos_tarjeta = df_mes[df_mes['tipo'] == 'COMPRA_TARJETA']['monto'].sum()
+        total_consumo = gastos_cash + gastos_tarjeta
+        
+        # RESULTADO (Lo que te queda del ingreso neto)
+        resultado_neto = total_ingresos - total_consumo
+
+        # VENCIMIENTOS (Lo que pagás hoy de resúmenes anteriores)
         df_tj = df_raw[df_raw['tipo'] == 'COMPRA_TARJETA'].copy()
-        vence_mes = 0
+        vence_ahora = 0
         if not df_tj.empty:
             df_tj['fecha_vto'] = df_tj.apply(lambda x: calcular_vto_real(x['fecha'], x['cierre'], x['vto']), axis=1)
-            vence_ahora = df_tj[(df_tj['fecha_vto'] >= f_ini) & (df_tj['fecha_vto'] <= f_fin)]
-            vence_mes = vence_ahora['monto'].sum()
-
-        disponible = total_ingresos - gastos_cash - vence_mes
+            vence_ahora_df = df_tj[(df_tj['fecha_vto'] >= f_ini) & (df_tj['fecha_vto'] <= f_fin)]
+            vence_ahora = vence_ahora_df['monto'].sum()
 
         c1, c2, c3 = st.columns(3)
         with c1:
             with st.container(border=True):
-                st.metric("✅ Disponible (Caja)", fmt_ars(disponible))
+                st.metric("💰 Resultado Neto", fmt_ars(resultado_neto), help="Ingresos - (Efectivo + Compras Tarjeta)")
                 st.caption(f"Ingresos: {fmt_ars(total_ingresos)}")
         with c2:
             with st.container(border=True):
-                st.metric("💳 Vencen este mes", fmt_ars(vence_mes))
+                st.metric("💳 Vence este mes", fmt_ars(vence_ahora), help="Monto del resumen a pagar este mes")
         with c3:
             with st.container(border=True):
-                st.metric("🛒 Gasto Efectivo", fmt_ars(gastos_cash))
+                st.metric("🛒 Consumo Total", fmt_ars(total_consumo))
+                st.caption(f"Tarjeta: {fmt_ars(gastos_tarjeta)} | Cash: {fmt_ars(gastos_cash)}")
 
         st.divider()
         col_g1, col_g2 = st.columns([2, 1])
@@ -158,30 +167,56 @@ elif menu == "📅 Planificador":
                     db_save(f_ini + timedelta(days=4), r['Monto'], r['Descripción'], c_id, df_cat[df_cat['nombre'] == r['Categoría']]['id'].values[0], tp)
             st.success("Plan guardado!"); time.sleep(1); st.rerun()
 
-# --- 3. CARGAR (MANUAL) ---
+# --- 3. CARGAR ---
 elif menu == "➕ Cargar":
     st.title("Nueva Operación Manual")
     tipo_op = st.radio("Tipo", ["Gasto", "Ingreso", "Pagar Tarjeta"], horizontal=True)
+    
     with st.container(border=True):
         with st.form("f_manual"):
-            col1, col2 = st.columns(2)
-            f = col1.date_input("Fecha", date.today())
-            m = col2.number_input("Monto", min_value=0.0, step=100.0)
-            d = st.text_input("Descripción")
-            cta_n = st.selectbox("Cuenta", df_cta['nombre'].tolist())
-            cat_n = st.selectbox("Categoría", df_cat['nombre'].tolist())
-            if st.form_submit_button("Guardar"):
+            if tipo_op != "Pagar Tarjeta":
+                col1, col2 = st.columns(2)
+                f = col1.date_input("Fecha", date.today())
+                m = col2.number_input("Monto", min_value=0.0, step=100.0)
+                d = st.text_input("Descripción")
+                c3, c4 = st.columns(2)
+                cta_n = c3.selectbox("Cuenta/Tarjeta", df_cta['nombre'].tolist())
+                cat_n = c4.selectbox("Categoría", df_cat['nombre'].tolist())
+            else:
+                col1, col2 = st.columns(2)
+                f = col1.date_input("Fecha", date.today())
+                m = col2.number_input("Monto Pagado", min_value=0.0, step=100.0)
+                d = st.text_input("Descripción", value="Pago de Resumen")
+                c3, c4 = st.columns(2)
+                cta_n = c3.selectbox("Desde (Banco/Efectivo)", df_cta[df_cta['tipo'] != 'CREDITO']['nombre'].tolist())
+                cta_dest = c4.selectbox("Tarjeta Pagada", df_cta[df_cta['tipo'] == 'CREDITO']['nombre'].tolist())
+                cat_n = df_cat.iloc[0]['nombre']
+
+            if st.form_submit_button("Guardar Movimiento", use_container_width=True):
                 id_c = df_cta[df_cta['nombre'] == cta_n]['id'].values[0]
-                tp = "INGRESO" if tipo_op == "Ingreso" else ("COMPRA_TARJETA" if df_cta[df_cta['nombre'] == cta_n]['tipo'].values[0] == 'CREDITO' else "GASTO")
-                db_save(f, m, d, id_c, df_cat[df_cat['nombre'] == cat_n]['id'].values[0], tp)
-                st.success("Guardado"); time.sleep(1); st.rerun()
+                id_ct = df_cat[df_cat['nombre'] == cat_n]['id'].values[0]
+                
+                if tipo_op == "Ingreso":
+                    tp = "INGRESO"
+                    db_save(f, m, d, id_c, id_ct, tp)
+                elif tipo_op == "Pagar Tarjeta":
+                    tp = "PAGO_TARJETA"
+                    id_dest = df_cta[df_cta['nombre'] == cta_dest]['id'].values[0]
+                    db_save(f, m, d, id_c, id_ct, tp, id_dest)
+                else:
+                    tp = "COMPRA_TARJETA" if df_cta[df_cta['nombre'] == cta_n]['tipo'].values[0] == 'CREDITO' else "GASTO"
+                    db_save(f, m, d, id_c, id_ct, tp)
+                
+                st.success("¡Guardado!"); time.sleep(1); st.rerun()
 
 # --- 4. TARJETAS ---
 elif menu == "💳 Tarjetas":
     st.title("Gestión de Crédito")
-    t1, t2 = st.tabs(["⚙️ Configurar Fechas", "📥 Importar Excel"])
-    with t1:
+    tab1, tab2 = st.tabs(["⚙️ Configurar Fechas", "📥 Importar Resumen"])
+    
+    with tab1:
         df_crd = df_cta[df_cta['tipo'] == 'CREDITO']
+        if df_crd.empty: st.info("No hay tarjetas de crédito.")
         for _, r in df_crd.iterrows():
             with st.container(border=True):
                 ca, cb, cc, cd = st.columns([2,1,1,1])
@@ -190,9 +225,10 @@ elif menu == "💳 Tarjetas":
                 vt = cc.number_input("Vto", 1, 31, int(r.get('dia_vencimiento') or 5), key=f"vt_{r['id']}")
                 if cd.button("Guardar", key=f"btn_{r['id']}", use_container_width=True):
                     supabase.table("cuentas").update({"dia_cierre": ci, "dia_vencimiento": vt}).eq("id", r['id']).execute()
-                    st.success("Ok"); time.sleep(1); st.rerun()
-    with t2:
-        up = st.file_uploader("Subí el resumen del banco (.xlsx o .csv)", type=['csv', 'xlsx'])
+                    st.success("Actualizado"); time.sleep(1); st.rerun()
+    
+    with tab2:
+        up = st.file_uploader("Subí el resumen (.xlsx o .csv)", type=['csv', 'xlsx'])
         if up:
             try:
                 if up.name.endswith('.csv'):
@@ -202,21 +238,20 @@ elif menu == "💳 Tarjetas":
                     header_row = 0
                     for i in range(len(df_raw)):
                         if 'Fecha' in df_raw.iloc[i].values or 'FECHA' in df_raw.iloc[i].values:
-                            header_row = i + 1
-                            break
+                            header_row = i + 1; break
                     df_up = pd.read_excel(up, skiprows=header_row)
                 
                 df_up = df_up.dropna(how='all').dropna(axis=1, how='all')
                 st.write("Vista previa:")
-                st.dataframe(df_up.head(10), use_container_width=True)
+                st.dataframe(df_up.head(5), width="stretch")
                 
-                with st.form("f_imp"):
+                with st.form("f_import"):
                     sel = st.selectbox("Asignar a:", df_cta[df_cta['tipo'] == 'CREDITO']['nombre'].tolist())
                     c1, c2, c3 = st.columns(3)
                     f_c = c1.selectbox("Col. Fecha", df_up.columns)
                     d_c = c2.selectbox("Col. Descripción", df_up.columns)
                     m_c = c3.selectbox("Col. Importe Pesos", df_up.columns)
-                    if st.form_submit_button("Importar"):
+                    if st.form_submit_button("Importar Todo", use_container_width=True):
                         id_tj = df_cta[df_cta['nombre'] == sel]['id'].values[0]
                         for _, row in df_up.iterrows():
                             try:
@@ -228,18 +263,15 @@ elif menu == "💳 Tarjetas":
                                 if monto > 0:
                                     db_save(fecha, monto, str(row[d_c]), id_tj, df_cat.iloc[0]['id'], "COMPRA_TARJETA")
                             except: continue
-                        st.success("Importado"); time.sleep(1); st.rerun()
+                        st.success("¡Importación Exitosa!"); time.sleep(1); st.rerun()
             except Exception as e: st.error(f"Error: {e}")
 
-# --- 5. HISTORIAL Y BORRADO ---
+# --- 5. HISTORIAL ---
 elif menu == "📝 Historial":
-    st.title("Gestión de Movimientos")
-    
-    # Checkbox para ignorar el filtro de mes del sidebar
+    st.title("Historial y Edición")
     ver_todo = st.checkbox("🔍 Ver TODOS los movimientos (ignorar filtro de mes)")
     
     if ver_todo:
-        # Traemos absolutamente todo
         df_h = get_movimientos(date(2024,1,1), date(2027,1,1))
     else:
         df_h = get_movimientos(f_ini, f_fin)
@@ -251,32 +283,24 @@ elif menu == "📝 Historial":
     with tab_edit:
         if not df_h.empty:
             st.data_editor(df_h[['id', 'fecha', 'descripcion', 'monto', 'cuenta', 'tipo']], 
-                           use_container_width=True, hide_index=True, key="editor_universal")
-        else:
-            st.info("No hay movimientos para mostrar.")
+                           width="stretch", hide_index=True, key="editor_universal")
+        else: st.info("No hay movimientos.")
 
     with tab_borrar:
         if not df_h.empty:
             st.subheader("Eliminar movimientos específicos")
-            # Lista desplegable con ID y Descripción para no borrar lo que no queremos
             opciones_borrar = {f"{r['fecha']} - {r['descripcion']} ({fmt_ars(r['monto'])})": r['id'] for _, r in df_h.iterrows()}
             seleccion = st.selectbox("Seleccioná qué querés borrar:", ["Seleccionar..."] + list(opciones_borrar.keys()))
             
             if st.button("Eliminar Permanentemente", type="primary") and seleccion != "Seleccionar...":
-                id_a_borrar = opciones_borrar[seleccion]
-                db_delete(id_a_borrar)
-                st.success(f"Eliminado correctamente.")
-                time.sleep(1)
-                st.rerun()
+                db_delete(opciones_borrar[seleccion])
+                st.success("Eliminado"); time.sleep(1); st.rerun()
                 
             st.divider()
             if st.checkbox("🚨 Habilitar borrado masivo de la vista actual"):
                 if st.button(f"BORRAR LOS {len(df_h)} REGISTROS VISIBLES", type="primary"):
-                    for _, row in df_h.iterrows():
-                        db_delete(row['id'])
-                    st.success("Limpieza total completada.")
-                    time.sleep(2)
-                    st.rerun()
+                    for _, row in df_h.iterrows(): db_delete(row['id'])
+                    st.success("Borrado masivo completado."); time.sleep(2); st.rerun()
 
 # --- 6. AJUSTES ---
 elif menu == "⚙️ Ajustes":
