@@ -1,231 +1,242 @@
 import os
 import re
+import asyncio
+import logging
+from contextlib import asynccontextmanager
 from datetime import date, datetime
-from fastapi import FastAPI, Request, HTTPException
+from dateutil.relativedelta import relativedelta
+
+from fastapi import FastAPI
 from supabase import create_client
+from telegram import Update
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
-# ======================
-# ENV VARS (Render)
-# ======================
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+# ==========================================
+# 1. CONFIGURACIÓN
+# ==========================================
+# Variables de entorno de Render
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+# Usamos SERVICE_ROLE_KEY para que el bot tenga permisos de escritura totales
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_KEY")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_SECRET") 
+# Tu ID numérico de Telegram por seguridad (opcional pero recomendado)
+ALLOWED_USER_ID = os.environ.get("ALLOWED_USER_ID")
 
-TELEGRAM_SECRET = os.environ["TELEGRAM_SECRET"]  # mismo valor que setWebhook secret_token
-ALLOWED_CHAT_ID = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID")  # opcional
+# Inicializar Supabase
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-app = FastAPI()
+# Logs
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-@app.get("/")
-def health():
-    return {"ok": True, "service": "telegram-bot"}
-
-
-# ======================
-# Helpers
-# ======================
-def norm(s: str) -> str:
-    s = s.strip().lower()
-    s = re.sub(r"[^a-z0-9]+", "_", s)
-    return s.strip("_")
-
-
-def parse_amount(s: str) -> float:
-    s = s.replace("$", "").replace(" ", "")
-    if "," in s and "." in s:
-        s = s.replace(".", "").replace(",", ".")
-    elif "," in s:
-        s = s.replace(",", ".")
-    return abs(float(s))
-
-
-def find_id_by_name(table: str, value: str) -> str:
-    """
-    Busca por match exacto en 'nombre'. Si no encuentra, hace match por normalización
-    (ej: 'Santander Visa' == 'santander_visa').
-    """
-    # 1) exacto
-    r = supabase.table(table).select("id,nombre").eq("nombre", value).limit(1).execute()
-    if r.data:
-        return r.data[0]["id"]
-
-    # 2) normalizado (trae lista y matchea)
-    all_rows = supabase.table(table).select("id,nombre").execute().data or []
-    target = norm(value)
-    for row in all_rows:
-        if norm(row["nombre"]) == target:
-            return row["id"]
-
-    raise ValueError(f"No existe {table}.nombre='{value}' (ni por alias normalizado)")
-
-
-def get_default_categoria_id() -> str:
-    r = supabase.table("categorias").select("id").order("nombre").limit(1).execute()
-    if not r.data:
-        raise ValueError("No hay categorías cargadas")
-    return r.data[0]["id"]
-
-
-def categorize(merchant: str, default_cat_id: str) -> str:
-    """
-    Regla simple por texto. Si querés, después lo hacemos configurable en Supabase.
-    """
-    m = merchant.upper()
-
-    rules = [
-        (r"(PEDIDOSYA|RAPPI|MCDONALD|BURGER|MOSTAZA)", "Comida"),
-        (r"(UBER|DIDI|CABIFY|TAXI)", "Transporte"),
-        (r"(NETFLIX|SPOTIFY|DISNEY|HBO|PRIME)", "Suscripciones"),
-        (r"(SUPERMERC|COTO|CARREFOUR|DIA|JUMBO|VEA)", "Supermercado"),
-    ]
-
-    # trae categorías una vez por request (simple)
-    cats = supabase.table("categorias").select("id,nombre").execute().data or []
-    cat_map = {norm(c["nombre"]): c["id"] for c in cats}
-
-    for pattern, cat_name in rules:
-        if re.search(pattern, m):
-            cid = cat_map.get(norm(cat_name))
-            if cid:
-                return cid
-
-    return default_cat_id
-
-
-# ======================
-# Webhook
-# ======================
-@app.post("/telegram")
-async def telegram_webhook(req: Request):
-    # Seguridad: Telegram puede mandar este header si seteás secret_token en setWebhook
-    secret_hdr = req.headers.get("x-telegram-bot-api-secret-token")
-    if secret_hdr != TELEGRAM_SECRET:
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    body = await req.json()
-
-    msg = body.get("message") or body.get("edited_message") or {}
-    text = msg.get("text")
-    chat = msg.get("chat") or {}
-    chat_id = str(chat.get("id", ""))
-    message_id = msg.get("message_id")
-
-    if ALLOWED_CHAT_ID and chat_id != str(ALLOWED_CHAT_ID):
-        raise HTTPException(status_code=403, detail="Chat not allowed")
-
-    if not text:
-        return {"ok": True}
-
-    # Formatos:
-    # g 12500 supermercado galicia
-    # i 250000 sueldo galicia
-    # t 18990 uber santander_visa
-    # p 120000 galicia santander_visa
-    # opcional fecha al final: YYYY-MM-DD
+# ==========================================
+# 2. FUNCIONES DE AYUDA (Lógica de Negocio)
+# ==========================================
+def get_account_by_name(name):
+    """Busca una cuenta por nombre. Si no encuentra, devuelve Efectivo o la primera."""
     try:
-        parts = text.strip().split()
-        if len(parts) < 3:
-            return {"ok": True, "error": "Formato corto"}
+        res = supabase.table("cuentas").select("*").execute()
+        cuentas = res.data or []
+        
+        # 1. Búsqueda exacta/parcial
+        for acc in cuentas:
+            if name.lower() in acc['nombre'].lower():
+                return acc
+        
+        # 2. Si no encuentra y no se especificó nada, busca 'Efectivo'
+        for acc in cuentas:
+            if "efectivo" in acc['nombre'].lower():
+                return acc
+                
+        # 3. Fallback: la primera que encuentre
+        return cuentas[0] if cuentas else None
+    except Exception as e:
+        logger.error(f"Error buscando cuenta: {e}")
+        return None
 
-        kind = parts[0].lower()
-        amount = parse_amount(parts[1])
+def get_category_general():
+    """Busca la categoría General o Varios."""
+    try:
+        res = supabase.table("categorias").select("*").execute()
+        cats = res.data or []
+        for cat in cats:
+            if "general" in cat['nombre'].lower() or "varios" in cat['nombre'].lower():
+                return cat
+        return cats[0] if cats else None
+    except Exception as e:
+        logger.error(f"Error buscando categoría: {e}")
+        return None
 
-        f = date.today()
-        if re.match(r"^\d{4}-\d{2}-\d{2}$", parts[-1]):
-            f = datetime.strptime(parts[-1], "%Y-%m-%d").date()
-            parts = parts[:-1]
+# ==========================================
+# 3. LÓGICA DEL BOT DE TELEGRAM
+# ==========================================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 **Bot Finanzas Pro Activo**\n\n"
+        "Ejemplos:\n"
+        "⚡ `2500 Cafe` (Gasto hoy)\n"
+        "📅 `15000 Super 2026-03-10` (Carga en fecha específica)\n"
+        "💳 `50000 Nafta Visa` (Detecta tarjeta y crea cuota)"
+    )
 
-        rest = parts[2:]
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1. Seguridad
+    user_id = str(update.effective_user.id)
+    if ALLOWED_USER_ID and user_id != str(ALLOWED_USER_ID):
+        await update.message.reply_text("⛔ No autorizado.")
+        return
 
-        default_cat_id = get_default_categoria_id()
+    text = update.message.text
+    
+    # 2. Extraer Monto (Busca el primer número)
+    match_monto = re.search(r'(\d+([.,]\d{1,2})?)', text)
+    if not match_monto:
+        await update.message.reply_text("🤷‍♂️ No entendí el monto. Ejemplo: '2500 Coto'.")
+        return
 
-        # dedupe reference
-        raw_ref = f"tg:{chat_id}:{message_id}"
+    monto_str = match_monto.group(1).replace(',', '.')
+    monto = float(monto_str)
+    
+    # Limpiar texto para buscar el resto
+    clean_text = text.replace(match_monto.group(0), '').strip()
+    
+    # 3. Extraer Fecha (Formato YYYY-MM-DD para cargar al mes que quieras)
+    fecha_gasto = date.today()
+    match_date = re.search(r'(\d{4}-\d{2}-\d{2})', clean_text)
+    if match_date:
+        try:
+            fecha_str = match_date.group(1)
+            fecha_gasto = datetime.strptime(fecha_str, "%Y-%m-%d").date()
+            clean_text = clean_text.replace(fecha_str, '').strip()
+        except: pass
 
-        if kind in ("g", "i"):
-            # ultimo token = cuenta
-            cuenta = rest[-1]
-            desc = " ".join(rest[:-1]) if len(rest) > 1 else "Sin desc"
+    # 4. Detectar Cuenta (Busca palabras clave)
+    # Por defecto 'Efectivo'
+    target_account = None
+    
+    # Obtenemos todas las cuentas para comparar
+    try:
+        all_accounts_res = supabase.table("cuentas").select("nombre, id, tipo").execute()
+        all_accounts = all_accounts_res.data or []
+    except: all_accounts = []
+    
+    words = clean_text.split()
+    desc_words = []
+    
+    # Separamos palabras de la descripción y la cuenta
+    for word in words:
+        is_acc_name = False
+        if all_accounts:
+            for acc in all_accounts:
+                if word.lower() in acc['nombre'].lower():
+                    target_account = acc
+                    is_acc_name = True
+                    break
+        if not is_acc_name:
+            desc_words.append(word)
+    
+    # Si no encontró cuenta explícita, usa Efectivo
+    if not target_account:
+        target_account = get_account_by_name("Efectivo")
 
-            cta_id = find_id_by_name("cuentas", cuenta)
-            cat_id = categorize(desc, default_cat_id)
+    descripcion = " ".join(desc_words) or "Gasto Telegram"
+    categoria = get_category_general()
 
-            tipo = "GASTO" if kind == "g" else "INGRESO"
+    if not target_account or not categoria:
+        await update.message.reply_text("❌ Error: No hay cuentas o categorías en la BD.")
+        return
 
-            payload = {
-                "fecha": str(f),
-                "monto": amount,
-                "descripcion": desc,
-                "cuenta_id": cta_id,
-                "categoria_id": cat_id,
-                "tipo": tipo,
-                "source": "telegram",
-                "raw_reference": raw_ref,
-                "merchant": desc,
-            }
-
-            # upsert por raw_reference para no duplicar
-            supabase.table("movimientos").upsert(payload, on_conflict="raw_reference").execute()
-
-        elif kind == "t":
-            # compra tarjeta
-            tarjeta = rest[-1]
-            desc = " ".join(rest[:-1]) if len(rest) > 1 else "Consumo tarjeta"
-
-            tid = find_id_by_name("cuentas", tarjeta)
-            cat_id = categorize(desc, default_cat_id)
-
-            payload = {
-                "fecha": str(f),
-                "monto": amount,
-                "descripcion": desc,
-                "cuenta_id": tid,
-                "categoria_id": cat_id,
-                "tipo": "COMPRA_TARJETA",
-                "source": "telegram",
-                "raw_reference": raw_ref,
-                "merchant": desc,
-            }
-
-            supabase.table("movimientos").upsert(payload, on_conflict="raw_reference").execute()
-
-        elif kind == "p":
-            # pago tarjeta (transferencia)
-            if len(rest) < 2:
-                return {"ok": True, "error": "p requiere origen y tarjeta"}
-
-            origen = rest[0]
-            tarjeta = rest[1]
-
-            id_origen = find_id_by_name("cuentas", origen)
-            id_tarjeta = find_id_by_name("cuentas", tarjeta)
-
-            payload = {
-                "fecha": str(f),
-                "monto": amount,
-                "descripcion": f"Pago tarjeta {tarjeta}",
-                "cuenta_id": id_origen,
-                "cuenta_destino_id": id_tarjeta,
-                "categoria_id": default_cat_id,
-                "tipo": "PAGO_TARJETA",
-                "source": "telegram",
-                "raw_reference": raw_ref,
-            }
-
-            supabase.table("movimientos").upsert(payload, on_conflict="raw_reference").execute()
-
+    # 5. Guardar en Supabase
+    try:
+        es_credito = target_account['tipo'] == 'CREDITO'
+        
+        if es_credito:
+            # COMPRA TARJETA (Genera compra + 1 cuota)
+            compra = supabase.table("compras_tarjeta").insert({
+                "fecha_compra": str(fecha_gasto),
+                "monto_total": monto,
+                "cuotas_total": 1,
+                "cuenta_id": target_account['id'],
+                "categoria_id": categoria['id'],
+                "descripcion": descripcion,
+                "source": "telegram_bot",
+                "merchant": descripcion
+            }).execute()
+            
+            if compra.data:
+                compra_id = compra.data[0]['id']
+                supabase.table("cuotas_tarjeta").insert({
+                    "compra_id": compra_id,
+                    "nro_cuota": 1,
+                    "fecha_cuota": str(fecha_gasto), # Impacta en el resumen de esta fecha
+                    "monto_cuota": monto,
+                    "estado": "pendiente"
+                }).execute()
+                await update.message.reply_text(f"💳 **Compra Tarjeta**\nDesc: {descripcion}\nMonto: ${monto}\nFecha: {fecha_gasto}\nCuenta: {target_account['nombre']}")
+            else:
+                await update.message.reply_text("❌ Error creando compra tarjeta.")
+                
         else:
-            return {"ok": True, "error": "Tipo inválido (g/i/t/p)"}
+            # GASTO NORMAL (Cash/Débito)
+            supabase.table("movimientos").insert({
+                "fecha": str(fecha_gasto),
+                "monto": monto,
+                "descripcion": descripcion,
+                "cuenta_id": target_account['id'],
+                "categoria_id": categoria['id'],
+                "tipo": "GASTO",
+                "source": "telegram_bot"
+            }).execute()
+            
+            await update.message.reply_text(f"✅ **Gasto Guardado**\nDesc: {descripcion}\nMonto: ${monto}\nFecha: {fecha_gasto}\nCuenta: {target_account['nombre']}")
 
     except Exception as e:
-        try:
-            supabase.table("bot_errors").insert({
-                "source": "telegram",
-                "message": str(e),
-                "raw_payload": body
-            }).execute()
-        except Exception:
-            pass
-        return {"ok": True, "error": str(e)}
+        logger.error(f"Error DB: {e}")
+        await update.message.reply_text(f"❌ Error interno: {str(e)}")
 
-    return {"ok": True}
+# ==========================================
+# 4. GESTIÓN DEL CICLO DE VIDA (FastAPI + Bot)
+# ==========================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- ARRANQUE ---
+    if not TELEGRAM_TOKEN:
+        logger.error("No se encontró TELEGRAM_TOKEN. El bot no arrancará.")
+        yield
+        return
+
+    # Crear la aplicación del bot
+    bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    
+    # Añadir manejadores
+    bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Inicializar y arrancar el bot
+    await bot_app.initialize()
+    await bot_app.start()
+    
+    # Comenzar el polling en modo no bloqueante
+    await bot_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    
+    logger.info("🤖 Bot de Telegram iniciado correctamente!")
+    
+    yield # Aquí FastAPI ejecuta el servidor web
+    
+    # --- APAGADO ---
+    logger.info("🛑 Deteniendo Bot de Telegram...")
+    await bot_app.updater.stop()
+    await bot_app.stop()
+    await bot_app.shutdown()
+
+# ==========================================
+# 5. APP FASTAPI (Keep-Alive para Render)
+# ==========================================
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/")
+def health_check():
+    return {"status": "ok", "bot": "running"}
