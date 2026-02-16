@@ -7,7 +7,7 @@ from dateutil.relativedelta import relativedelta
 import plotly.express as px
 import time
 
-# --- 1. CONFIGURACIÓN VISUAL ---
+# --- 1. CONFIGURACIÓN VISUAL (ESTILO FINTECH) ---
 st.set_page_config(
     page_title="Finanzas Pro", 
     page_icon="💸", 
@@ -26,14 +26,13 @@ st.markdown("""
     
     /* TARJETAS (Métricas) que se adaptan al modo oscuro */
     div[data-testid="stMetric"] {
-        background-color: var(--secondary-background-color); /* Se adapta al tema */
-        border: 1px solid rgba(250, 250, 250, 0.1); /* Borde sutil */
+        background-color: var(--secondary-background-color); 
+        border: 1px solid rgba(128, 128, 128, 0.2);
         padding: 15px;
         border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
     }
     
-    /* Ajuste de textos en métricas */
     div[data-testid="stMetricLabel"] p {
         font-weight: 600 !important;
         opacity: 0.8;
@@ -51,23 +50,22 @@ st.markdown("""
         justify-content: flex-start;
         font-size: 0.85rem;
         margin-bottom: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
     .day-header {
         font-weight: 700;
         color: var(--text-color);
-        opacity: 0.7;
+        opacity: 0.8;
         margin-bottom: 4px;
         border-bottom: 1px solid rgba(128, 128, 128, 0.2);
     }
-    
-    /* Etiquetas de dinero con fondo suave */
     .tag-ing { 
-        color: #4ade80; /* Verde brillante para dark mode */
+        color: #4ade80; 
         background: rgba(74, 222, 128, 0.1); 
         padding: 2px 6px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; margin-top: 2px;
     }
     .tag-gas { 
-        color: #f87171; /* Rojo brillante para dark mode */
+        color: #f87171; 
         background: rgba(248, 113, 113, 0.1); 
         padding: 2px 6px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; margin-top: 2px;
     }
@@ -84,11 +82,6 @@ st.markdown("""
         text-align: center;
         border: 1px solid rgba(128, 128, 128, 0.2);
     }
-    
-    /* Ajuste de inputs y tablas para que no brillen tanto */
-    .stTextInput, .stNumberInput, .stSelectbox, .stDateInput {
-        accent-color: #FF4B4B;
-    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -103,7 +96,7 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- LOGIN SIMPLE ---
+# --- LOGIN ---
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state.password_correct = False
@@ -197,7 +190,7 @@ with st.sidebar:
     f_fin = f_ini + relativedelta(months=1) - timedelta(days=1)
 
 # ==========================================
-# 1. DASHBOARD (FIXED FOR DARK MODE)
+# 1. DASHBOARD
 # ==========================================
 if menu == "📊 Dashboard":
     st.markdown(f"## 📈 Balance: {f_ini.strftime('%B %Y')}")
@@ -236,7 +229,6 @@ if menu == "📊 Dashboard":
             if not df_mes.empty:
                 df_chart = df_mes[df_mes['tipo'] != 'INGRESO']
                 if not df_chart.empty:
-                    # Sin template forzado para que use el del sistema (Dark)
                     fig = px.bar(df_chart, x='fecha', y='monto', color='categoria', 
                                  color_discrete_sequence=px.colors.qualitative.Pastel)
                     fig.update_layout(xaxis_title=None, yaxis_title=None, height=320, margin=dict(l=0,r=0,t=0,b=0))
@@ -348,12 +340,24 @@ elif menu == "➕ Nueva Operación":
             c_date, c_info = st.columns([1,2])
             fecha_imp = c_date.date_input("Fecha Impacto", date.today().replace(day=5))
             c_info.info(f"Se crearán en **{fecha_imp.strftime('%B')}**.")
-            ed_sus = st.data_editor(df_sus[['descripcion', 'monto']], use_container_width=True, num_rows="dynamic", column_config={"monto": st.column_config.NumberColumn("Monto", format="$ %.2f")})
+            
+            # FIX CRÍTICO: num_rows="fixed" para que no agreguen filas sin ID
+            ed_sus = st.data_editor(
+                df_sus[['descripcion', 'monto']], 
+                use_container_width=True, 
+                num_rows="fixed", 
+                column_config={"monto": st.column_config.NumberColumn("Monto", format="$ %.2f")}
+            )
+            
             if st.button("🚀 Procesar", type="primary"):
+                c = 0
                 for i, row in ed_sus.iterrows():
-                    orig = df_sus.iloc[i]
-                    db_save(fecha_imp, row['monto'], row['descripcion'], orig['cuenta_id'], orig['categoria_id'], orig['tipo'])
-                st.toast("✅ Procesado"); time.sleep(1); st.rerun()
+                    # FIX CRÍTICO: Buscar por índice en el DF original para obtener los IDs ocultos
+                    if i in df_sus.index:
+                        orig = df_sus.loc[i]
+                        db_save(fecha_imp, row['monto'], row['descripcion'], orig['cuenta_id'], orig['categoria_id'], orig['tipo'])
+                        c += 1
+                st.toast(f"✅ {c} movimientos procesados"); time.sleep(1); st.rerun()
         else: st.warning("No hay fijos configurados.")
 
     with t3:
