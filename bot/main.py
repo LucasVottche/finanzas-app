@@ -3,7 +3,7 @@ import re
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta  # <--- AQUÍ FALTABA TIMEDELTA
+from datetime import date, datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
 from fastapi import FastAPI
@@ -54,32 +54,45 @@ def get_category_general():
         return cats[0] if cats else None
     except: return None
 
+def get_base_salary():
+    """Busca el sueldo base en la tabla configuracion."""
+    try:
+        res = supabase.table("configuracion").select("valor").eq("clave", "sueldo_mensual").execute()
+        if res.data:
+            return float(res.data[0]['valor'])
+        return 0.0
+    except Exception as e:
+        logger.error(f"Error obteniendo sueldo base: {e}")
+        return 0.0
+
 def get_monthly_balance():
     try:
         # Fechas
         today = date.today()
         first_day = date(today.year, today.month, 1)
-        # Aquí fallaba antes por falta de timedelta
         last_day = first_day + relativedelta(months=1) - timedelta(days=1)
         
-        logger.info(f"🔍 Consultando balance desde {first_day} hasta {last_day}")
+        # 1. Obtener Sueldo Base (Configuración)
+        sueldo_base = get_base_salary()
 
-        # Consulta DB
+        # 2. Obtener Movimientos (Ingresos y Gastos)
         res = supabase.table("movimientos")\
-            .select("tipo, monto, fecha")\
+            .select("tipo, monto")\
             .gte("fecha", str(first_day))\
             .lte("fecha", str(last_day))\
             .execute()
         
         data = res.data or []
         
-        # LOG PARA DEBUG: Ver qué devuelve Supabase en la consola de Render
-        logger.info(f"📊 Datos encontrados: {len(data)} movimientos")
-        
-        ingresos = sum(d['monto'] for d in data if d['tipo'] == 'INGRESO')
+        # Sumar movimientos manuales
+        ingresos_registrados = sum(d['monto'] for d in data if d['tipo'] == 'INGRESO')
         gastos = sum(d['monto'] for d in data if d['tipo'] in ['GASTO', 'COMPRA_TARJETA'])
         
-        return ingresos, gastos
+        # Lógica de la App: Si hay ingresos manuales, usarlos. Si no, usar el sueldo base.
+        total_ingresos = ingresos_registrados if ingresos_registrados > 0 else sueldo_base
+
+        return total_ingresos, gastos
+
     except Exception as e:
         logger.error(f"❌ Error calculando balance: {e}")
         return 0, 0
@@ -93,7 +106,6 @@ async def reply_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ing, gas = get_monthly_balance()
     neto = ing - gas
     
-    # Nombre del mes en español simple
     meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
     mes_nombre = meses[date.today().month - 1]
 
@@ -266,7 +278,7 @@ async def lifespan(app: FastAPI):
     bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
     bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(CommandHandler("saldo", reply_balance)) # Handler directo
+    bot_app.add_handler(CommandHandler("saldo", reply_balance))
     bot_app.add_handler(CommandHandler("ayuda", help_command))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
