@@ -15,71 +15,80 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# CSS PROFESIONAL CON CONTRASTE MEJORADO
+# CSS PROFESIONAL CON CONTRASTE ALTO
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
     
+    /* Fondo General de la App (Gris Claro) para que resalten las tarjetas */
+    .stApp {
+        background-color: #f0f2f6;
+    }
+    
     html, body, [class*="css"] {
         font-family: 'Inter', sans-serif;
-        background-color: #f8f9fa; /* Fondo gris muy suave para la app */
     }
     
     /* Títulos */
     h1, h2, h3 { font-weight: 700; color: #1e293b; }
     
-    /* Tarjetas de Métricas (Cards) - AHORA CON BORDE VISIBLE */
+    /* TARJETAS DE MÉTRICAS (Dashboard) */
     div[data-testid="stMetric"] {
-        background-color: #ffffff;
-        border: 1px solid #cbd5e1; /* Borde gris más oscuro */
-        padding: 20px;
-        border-radius: 12px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); /* Sombra más marcada */
-        transition: transform 0.2s;
-    }
-    div[data-testid="stMetric"]:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.15);
-        border-color: #94a3b8;
+        background-color: #ffffff !important;
+        border: 1px solid #cbd5e1 !important; /* Borde gris visible */
+        padding: 20px !important;
+        border-radius: 12px !important;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06) !important;
     }
     
-    /* Contenedores generales (Gráficos, tablas) */
-    div[data-testid="stVerticalBlock"] > div[style*="background-color"] {
-        border: 1px solid #cbd5e1;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    /* Etiquetas de las métricas (Título pequeño arriba del número) */
+    div[data-testid="stMetricLabel"] p {
+        font-size: 1rem !important;
+        font-weight: 600 !important;
+        color: #64748b !important;
     }
     
-    /* Calendario Estilizado */
+    /* Números grandes de las métricas */
+    div[data-testid="stMetricValue"] div {
+        font-size: 1.8rem !important;
+        font-weight: 700 !important;
+        color: #0f172a !important;
+    }
+
+    /* CALENDARIO ESTILIZADO */
     .day-card {
-        background: white;
+        background: #ffffff;
         border: 1px solid #cbd5e1;
         border-radius: 8px;
-        height: 100px;
+        height: 110px;
         padding: 8px;
         display: flex;
         flex-direction: column;
         justify-content: flex-start;
         font-size: 0.85rem;
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        margin-bottom: 8px;
     }
     .day-header {
         font-weight: 700;
-        color: #64748b;
+        color: #334155;
         margin-bottom: 4px;
-        border-bottom: 1px solid #f1f5f9;
+        border-bottom: 1px solid #e2e8f0;
+        padding-bottom: 2px;
     }
-    .tag-ing { color: #059669; font-weight: 600; background: #d1fae5; padding: 2px 6px; border-radius: 4px; margin-top:2px; font-size:0.75rem;}
-    .tag-gas { color: #dc2626; font-weight: 600; background: #fee2e2; padding: 2px 6px; border-radius: 4px; margin-top:2px; font-size:0.75rem;}
+    .tag-ing { color: #059669; font-weight: 700; font-size: 0.8rem;}
+    .tag-gas { color: #dc2626; font-weight: 700; font-size: 0.8rem;}
     
-    /* Sidebar Título */
+    /* Sidebar */
     .sidebar-brand {
         font-size: 1.5rem;
         font-weight: 800;
         color: #0f172a;
         margin-bottom: 1rem;
-        display: flex;
-        align-items: center;
-        gap: 10px;
+        padding: 10px;
+        background: #e2e8f0;
+        border-radius: 8px;
+        text-align: center;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -184,27 +193,21 @@ if menu == "📊 Dashboard":
         df_mes = df_raw[(df_raw['fecha'] >= f_ini) & (df_raw['fecha'] <= f_fin)]
         
         # --- CÁLCULOS INTELIGENTES ---
-        # 1. Ingresos Reales vs Estimados
         ing_registrados = df_mes[df_mes['tipo'] == 'INGRESO']['monto'].sum()
         total_ingresos = ing_registrados if ing_registrados > 0 else sueldo_base
         
-        # 2. Consumo Real (Todo lo que gastaste en el mes, sin importar pago)
         gastos_cash = df_mes[df_mes['tipo'] == 'GASTO']['monto'].sum()
         gastos_tj = df_mes[df_mes['tipo'] == 'COMPRA_TARJETA']['monto'].sum()
         total_consumo = gastos_cash + gastos_tj
         
-        # 3. Lo que tenés que pagar de Resumen (Vencimientos de meses anteriores)
+        # Vencimientos Tarjeta
         df_tj = df_raw[df_raw['tipo'] == 'COMPRA_TARJETA'].copy()
         vence_ahora = 0
         if not df_tj.empty:
             df_tj['fecha_vto'] = df_tj.apply(lambda x: calcular_vto_real(x['fecha'], x['cierre'], x['vto']), axis=1)
             vence_ahora = df_tj[(df_tj['fecha_vto'] >= f_ini) & (df_tj['fecha_vto'] <= f_fin)]['monto'].sum()
 
-        # 4. Resultados Clave
-        # SALDO DEL MES = Ingresos - Todo lo que consumiste (Responde: ¿Me alcanza el sueldo?)
         saldo_mes = total_ingresos - total_consumo
-        
-        # CAJA REAL = Ingresos - Gastos Efectivo - Resumen Tarjeta (Responde: ¿Tengo plata en el banco?)
         caja_real = total_ingresos - gastos_cash - vence_ahora
 
         # --- TARJETAS VISUALES ---
@@ -242,7 +245,7 @@ if menu == "📊 Dashboard":
                     st.plotly_chart(fig_p, use_container_width=True)
                 else: st.info("Sin datos.")
     else:
-        st.warning("⚠️ No hay datos cargados para este mes. Andá a **Nueva Operación** o **Ajustes** para cargar fijos.")
+        st.warning("⚠️ No hay datos cargados para este mes.")
 
 # ==========================================
 # 2. CALENDARIO (UX PREMIUM)
@@ -281,11 +284,11 @@ elif menu == "📅 Calendario":
                         st.markdown(f"<div class='day-card'>{content_html}</div>", unsafe_allow_html=True)
                         
                         if not evs.empty:
-                            with st.popover("", use_container_width=True):
+                            with st.popover("Ver", use_container_width=True):
                                 st.caption(f"Detalle del día {dia}")
                                 st.dataframe(evs[['descripcion', 'monto']], hide_index=True)
                     else:
-                        st.markdown(f"<div class='day-card' style='background:#f8fafc; opacity:0.7;'>{content_html}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div class='day-card' style='background:#f1f5f9; opacity:0.6;'>{content_html}</div>", unsafe_allow_html=True)
                 else:
                     st.write("")
 
@@ -382,7 +385,7 @@ elif menu == "➕ Nueva Operación":
                     fc = c1.selectbox("Col. Fecha", df_u.columns)
                     dc = c2.selectbox("Col. Detalle", df_u.columns)
                     mc = c3.selectbox("Col. Pesos", df_u.columns)
-                    if st.form_submit_button("Importar Movimientos", type="primary"):
+                    if st.form_submit_button("Importar"):
                         tid = df_cta[df_cta['nombre']==sel]['id'].values[0]
                         cnt = 0
                         for _, r in df_u.iterrows():
@@ -486,12 +489,12 @@ elif "Tarjetas" in menu:
         for _, r in df_cta[df_cta['tipo']=='CREDITO'].iterrows():
             with st.container(border=True):
                 c1, c2, c3, c4 = st.columns([2,1,1,1])
-                c1.markdown(f"**{r['nombre']}**")
+                c1.write(f"**{r['nombre']}**")
                 ci = c2.number_input("Cierre", 1, 31, int(r.get('dia_cierre') or 23), key=f"c{r['id']}")
                 vt = c3.number_input("Vto", 1, 31, int(r.get('dia_vencimiento') or 5), key=f"v{r['id']}")
                 if c4.button("💾", key=f"b{r['id']}"):
                     supabase.table("cuentas").update({"dia_cierre": ci, "dia_vencimiento": vt}).eq("id", r['id']).execute()
-                    st.toast("Guardado"); time.sleep(1)
+                    st.toast("Guardado")
 
 elif "Ajustes" in menu:
     st.markdown("### ⚙️ Preferencias")
