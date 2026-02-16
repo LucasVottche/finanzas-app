@@ -1,6 +1,7 @@
 streamlit
 pandas
-plotly
 supabase
 python-dateutil
+plotly
+bcrypt
 openpyxl
