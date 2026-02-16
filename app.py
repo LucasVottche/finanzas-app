@@ -15,68 +15,70 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- 2. ESTILOS PRO (CSS INYECTADO) ---
-# Esto es lo que le da el look "Fintech"
+# --- 2. ESTILOS PRO (CSS CORREGIDO) ---
 st.markdown("""
     <style>
-    /* Importar fuente moderna */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap');
+    /* Fuente General */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
     
     html, body, [class*="css"] {
         font-family: 'Inter', sans-serif;
     }
     
-    /* Estilo para las Métricas (Tarjetas) */
+    /* Arreglo Título Sidebar Cortado */
+    [data-testid="stSidebarNav"] {
+        padding-top: 0rem;
+    }
+    .sidebar-title {
+        font-size: 1.8rem;
+        font-weight: 700;
+        color: #1e293b;
+        margin-bottom: 20px;
+        margin-top: 10px;
+    }
+    
+    /* Tarjetas del Dashboard */
     div[data-testid="stMetric"] {
         background-color: #ffffff;
-        border: 1px solid #f0f2f6;
-        padding: 20px;
-        border-radius: 12px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
-        transition: transform 0.2s;
-    }
-    div[data-testid="stMetric"]:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 8px rgba(0, 0, 0, 0.1);
-    }
-    
-    /* Encabezados más limpios */
-    h1 { font-weight: 700; color: #1e293b; letter-spacing: -1px;}
-    h2 { font-weight: 600; color: #334155; letter-spacing: -0.5px;}
-    h3 { font-weight: 600; color: #475569;}
-    
-    /* Botones más atractivos */
-    div.stButton > button {
-        border-radius: 8px;
-        font-weight: 600;
-        height: 3rem;
-    }
-    
-    /* Ajuste de tablas */
-    div[data-testid="stDataFrame"] {
         border: 1px solid #e2e8f0;
-        border-radius: 10px;
-        overflow: hidden;
+        padding: 15px;
+        border-radius: 12px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
     
-    /* Calendario */
+    /* CALENDARIO ARREGLADO */
     .day-card {
-        background-color: white;
-        border: 1px solid #e5e7eb;
+        background-color: #ffffff;
+        border: 1px solid #cbd5e1; /* Borde más visible */
         border-radius: 8px;
-        padding: 10px;
+        padding: 8px;
         text-align: center;
-        height: 100px;
-        font-size: 0.9rem;
-    }
-    .day-header {
-        text-align: center;
-        font-weight: bold;
-        color: #64748b;
+        height: 110px; /* Altura fija para que no colapse */
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05); /* Sombra suave */
         margin-bottom: 10px;
     }
-    .money-pos { color: #10b981; font-weight: bold; font-size: 0.8rem;}
-    .money-neg { color: #ef4444; font-weight: bold; font-size: 0.8rem;}
+    
+    .day-number {
+        font-weight: 700;
+        color: #334155;
+        font-size: 1rem;
+        margin-bottom: 5px;
+        border-bottom: 1px solid #f1f5f9;
+    }
+    
+    .day-empty {
+        background-color: #f8fafc;
+        border: 1px dashed #cbd5e1;
+        border-radius: 8px;
+        height: 110px;
+        opacity: 0.5;
+    }
+
+    .money-pos { color: #059669; font-weight: 600; font-size: 0.85rem; }
+    .money-neg { color: #dc2626; font-weight: 600; font-size: 0.85rem; }
     
     </style>
 """, unsafe_allow_html=True)
@@ -92,7 +94,7 @@ def check_password():
     col1, col2, col3 = st.columns([1,1,1])
     with col2:
         st.markdown("<br><br><h2 style='text-align:center;'>🔐 Finanzas Pro</h2>", unsafe_allow_html=True)
-        pwd = st.text_input("Ingresá tu contraseña", type="password", label_visibility="collapsed", placeholder="Contraseña")
+        pwd = st.text_input("Ingresá tu contraseña", type="password", label_visibility="collapsed")
         if st.button("Ingresar", type="primary", use_container_width=True):
             if pwd == "admin": 
                 st.session_state.password_correct = True
@@ -190,19 +192,18 @@ def delete_meta(mid):
 # --- CARGA GLOBAL ---
 df_cta, df_cat, sueldo_base = get_maestros()
 
-# --- 5. SIDEBAR & NAVEGACIÓN ---
+# --- 5. SIDEBAR ---
 with st.sidebar:
-    st.markdown("## 🦅 Lucas Finanzas")
-    st.markdown("---")
+    # TÍTULO ARREGLADO (HTML PERSONALIZADO)
+    st.markdown("<div class='sidebar-title'>🦅 Lucas Finanzas</div>", unsafe_allow_html=True)
     
-    # Navegación con Iconos
-    menu = st.radio("", 
-        ["📊 Dashboard", "📅 Calendario", "➕ Operaciones", "🎯 Metas", "📝 Historial", "💳 Tarjetas", "⚙️ Ajustes"],
-        index=0, label_visibility="collapsed"
+    menu = st.radio("Navegación", 
+        ["Dashboard", "Calendario", "Nueva Operación", "Metas", "Historial", "Tarjetas", "Configuración"],
+        label_visibility="collapsed"
     )
     
-    st.markdown("---")
-    st.caption("Filtro Global")
+    st.divider()
+    st.markdown("### 📅 Filtro")
     c_mes, c_anio = st.columns(2)
     mes_sel = c_mes.selectbox("Mes", range(1, 13), index=date.today().month - 1, label_visibility="collapsed")
     anio_sel = c_anio.number_input("Año", value=date.today().year, step=1, label_visibility="collapsed")
@@ -213,21 +214,19 @@ with st.sidebar:
 # ==========================================
 # 1. DASHBOARD
 # ==========================================
-if "Dashboard" in menu:
-    st.markdown(f"### Balance de {f_ini.strftime('%B %Y')}")
+if menu == "Dashboard":
+    st.markdown(f"## 📈 Balance de {f_ini.strftime('%B %Y')}")
     df_raw = get_movimientos(f_ini, f_fin)
     
     if not df_raw.empty:
         df_mes = df_raw[(df_raw['fecha'] >= f_ini) & (df_raw['fecha'] <= f_fin)]
         
-        # Cálculos
         ing_registrados = df_mes[df_mes['tipo'] == 'INGRESO']['monto'].sum()
         total_ingresos = ing_registrados if ing_registrados > 0 else sueldo_base
         
         gastos_cash = df_mes[df_mes['tipo'] == 'GASTO']['monto'].sum()
         gastos_tj = df_mes[df_mes['tipo'] == 'COMPRA_TARJETA']['monto'].sum()
         
-        # Vencimientos
         df_tj = df_raw[df_raw['tipo'] == 'COMPRA_TARJETA'].copy()
         vence_ahora = 0
         if not df_tj.empty:
@@ -237,16 +236,14 @@ if "Dashboard" in menu:
         disponible = total_ingresos - gastos_cash - vence_ahora
         resultado_neto = total_ingresos - (gastos_cash + gastos_tj)
 
-        # UI: Tarjetas de Métricas
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("💰 Resultado Neto", fmt_ars(resultado_neto), delta="Ingreso - Consumo", delta_color="normal")
-        col2.metric("✅ Caja Disponible", fmt_ars(disponible), help="Lo que tenés 'en mano' después de pagar todo.")
-        col3.metric("💳 Vence Tarjeta", fmt_ars(vence_ahora), delta="A pagar este mes", delta_color="inverse")
-        col4.metric("📉 Consumo Total", fmt_ars(gastos_cash + gastos_tj), delta="Cash + Cuotas nuevas", delta_color="inverse")
+        col2.metric("✅ Caja Disponible", fmt_ars(disponible), help="Lo que tenés 'en mano'")
+        col3.metric("🛒 Consumo Total", fmt_ars(gastos_cash + gastos_tj), delta="Cash + Tarjeta", delta_color="inverse")
+        col4.metric("💳 Vence Tarjeta", fmt_ars(vence_ahora), delta="A pagar este mes", delta_color="inverse")
 
-        st.markdown("<br>", unsafe_allow_html=True) # Espacio
+        st.markdown("<br>", unsafe_allow_html=True) 
 
-        # UI: Gráficos Limpios
         c_chart1, c_chart2 = st.columns([2, 1])
         with c_chart1:
             st.markdown("##### 📈 Flujo Diario")
@@ -269,12 +266,12 @@ if "Dashboard" in menu:
                     fig_p.update_layout(showlegend=False, height=320, margin=dict(l=0,r=0,t=0,b=0))
                     st.plotly_chart(fig_p, use_container_width=True)
     else:
-        st.warning("No hay datos cargados en este mes. Andá a **➕ Operaciones** para empezar.")
+        st.warning("No hay datos cargados en este mes.")
 
 # ==========================================
 # 2. CALENDARIO
 # ==========================================
-elif "Calendario" in menu:
+elif menu == "Calendario":
     st.markdown(f"### 📅 Agenda: {f_ini.strftime('%B %Y')}")
     df_cal = get_movimientos(f_ini, f_fin)
     if not df_cal.empty:
@@ -284,10 +281,9 @@ elif "Calendario" in menu:
     semanas = cal.monthdayscalendar(anio_sel, mes_sel)
     dias = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
     
-    # Header Días
     cols = st.columns(7)
     for i, d in enumerate(dias):
-        cols[i].markdown(f"<div class='day-header'>{d}</div>", unsafe_allow_html=True)
+        cols[i].markdown(f"<div style='text-align:center; font-weight:bold; color:#64748b; margin-bottom:10px;'>{d}</div>", unsafe_allow_html=True)
         
     for semana in semanas:
         cols = st.columns(7)
@@ -297,6 +293,7 @@ elif "Calendario" in menu:
                     fecha_dia = date(anio_sel, mes_sel, dia)
                     ing_txt, gas_txt = "", ""
                     
+                    # Logica del contenido
                     if not df_cal.empty:
                         evs = df_cal[df_cal['fecha'] == fecha_dia]
                         ing = evs[evs['tipo']=='INGRESO']['monto'].sum()
@@ -305,28 +302,29 @@ elif "Calendario" in menu:
                         if ing > 0: ing_txt = f"<div class='money-pos'>+{fmt_ars(ing)}</div>"
                         if gas > 0: gas_txt = f"<div class='money-neg'>-{fmt_ars(gas)}</div>"
                         
-                        # Card HTML
+                        # Renderizado Tarjeta Día
                         st.markdown(f"""
                         <div class="day-card">
-                            <div style="font-weight:bold; color:#333;">{dia}</div>
+                            <div class="day-number">{dia}</div>
                             {ing_txt}
                             {gas_txt}
                         </div>
                         """, unsafe_allow_html=True)
                         
+                        # Popover invisible sobre la tarjeta (workaround para click)
                         if not evs.empty:
-                            with st.popover("Ver Detalles"):
+                            with st.popover("👁️ Ver", use_container_width=True):
                                 st.dataframe(evs[['descripcion', 'monto']], hide_index=True)
                     else:
-                        st.markdown(f"""<div class="day-card" style="color:#ccc;">{dia}</div>""", unsafe_allow_html=True)
+                        st.markdown(f"""<div class="day-card"><div class="day-number">{dia}</div></div>""", unsafe_allow_html=True)
                 else:
-                    st.write("")
+                    st.markdown("""<div class="day-empty"></div>""", unsafe_allow_html=True)
 
 # ==========================================
-# 3. OPERACIONES (CARGAR)
+# 3. CARGAR
 # ==========================================
-elif "Operaciones" in menu:
-    st.markdown("### Registrar Movimiento")
+elif menu == "Nueva Operación":
+    st.markdown("### ➕ Registrar Movimiento")
     
     t1, t2, t3 = st.tabs(["Manual / Cuotas", "🔄 Recurrentes", "📥 Importar Excel"])
     
@@ -337,25 +335,23 @@ elif "Operaciones" in menu:
             
             c1, c2 = st.columns(2)
             f = c1.date_input("Fecha", date.today())
-            m = c2.number_input("Monto Total", min_value=0.0, step=100.0)
-            d = st.text_input("Descripción", placeholder="Ej: Supermercado, Nafta, Netflix")
+            m = c2.number_input("Monto Total ($)", min_value=0.0, step=100.0)
+            d = st.text_input("Descripción", placeholder="Ej: Supermercado")
             
             c3, c4 = st.columns(2)
             if col_tipo == "Pagar Tarjeta":
-                cta_n = c3.selectbox("Desde (Banco/Efvo)", df_cta[df_cta['tipo']!='CREDITO']['nombre'].tolist())
-                cta_dest = c4.selectbox("Qué Tarjeta Pagaste", df_cta[df_cta['tipo']=='CREDITO']['nombre'].tolist())
+                cta_n = c3.selectbox("Desde", df_cta[df_cta['tipo']!='CREDITO']['nombre'].tolist())
+                cta_dest = c4.selectbox("Tarjeta", df_cta[df_cta['tipo']=='CREDITO']['nombre'].tolist())
                 cat_n = df_cat.iloc[0]['nombre']
             else:
-                cta_n = c3.selectbox("Cuenta / Tarjeta", df_cta['nombre'].tolist())
+                cta_n = c3.selectbox("Cuenta", df_cta['nombre'].tolist())
                 cat_n = c4.selectbox("Categoría", df_cat['nombre'].tolist())
             
             cuotas = 1
             if col_tipo == "Gasto":
-                cuotas = st.slider("Cantidad de Cuotas", 1, 24, 1)
-                if cuotas > 1:
-                    st.info(f"Se crearán {cuotas} pagos mensuales de {fmt_ars(m/cuotas)}.")
+                cuotas = st.slider("Cuotas", 1, 24, 1)
 
-            if st.button("Guardar Operación", type="primary", use_container_width=True):
+            if st.button("Guardar", type="primary", use_container_width=True):
                 id_c = df_cta[df_cta['nombre'] == cta_n]['id'].values[0]
                 id_ct = df_cat[df_cat['nombre'] == cat_n]['id'].values[0]
                 
@@ -370,41 +366,35 @@ elif "Operaciones" in menu:
                     if cuotas > 1:
                         m_cuota = m / cuotas
                         for i in range(cuotas):
-                            f_pago = f + relativedelta(months=i)
-                            d_c = f"{d} (Cuota {i+1}/{cuotas})"
-                            db_save(f_pago, m_cuota, d_c, id_c, id_ct, tp)
+                            f_p = f + relativedelta(months=i)
+                            d_c = f"{d} ({i+1}/{cuotas})"
+                            db_save(f_p, m_cuota, d_c, id_c, id_ct, tp)
                     else:
                         db_save(f, m, d, id_c, id_ct, tp)
-                st.toast("✅ ¡Operación guardada con éxito!")
-                time.sleep(1)
-                st.rerun()
+                st.toast("✅ Guardado")
+                time.sleep(1); st.rerun()
 
     with t2:
         df_sus = get_suscripciones()
         if not df_sus.empty:
             c_date, c_info = st.columns([1,2])
-            fecha_imp = c_date.date_input("Fecha de Impacto", date.today().replace(day=5))
-            c_info.info(f"Los gastos se crearán con fecha: **{fecha_imp.strftime('%d/%m/%Y')}**")
+            fecha_imp = c_date.date_input("Fecha Impacto", date.today().replace(day=5))
+            c_info.info(f"Se crearán con fecha: **{fecha_imp.strftime('%d/%m/%Y')}**")
             
-            st.write("Ajustá los montos de este mes si cambiaron:")
-            ed_sus = st.data_editor(df_sus[['descripcion', 'monto']], use_container_width=True, num_rows="dynamic",
-                                    column_config={"monto": st.column_config.NumberColumn("Monto", format="$ %.2f")})
+            ed_sus = st.data_editor(df_sus[['descripcion', 'monto']], use_container_width=True, num_rows="dynamic", column_config={"monto": st.column_config.NumberColumn("Monto", format="$ %.2f")})
             
-            if st.button("🚀 Procesar Fijos", type="primary", use_container_width=True):
+            if st.button("🚀 Procesar", type="primary", use_container_width=True):
                 c = 0
                 for i, row in ed_sus.iterrows():
                     orig = df_sus.iloc[i]
                     db_save(fecha_imp, row['monto'], row['descripcion'], orig['cuenta_id'], orig['categoria_id'], orig['tipo'])
                     c += 1
-                st.toast(f"✅ Se generaron {c} movimientos.")
-                time.sleep(2)
-                st.rerun()
+                st.toast(f"✅ {c} movimientos creados."); time.sleep(1); st.rerun()
         else:
-            st.warning("Configurá tus gastos fijos en 'Ajustes' primero.")
+            st.warning("Configurá tus gastos fijos en 'Configuración'.")
 
     with t3:
-        st.info("Compatible con Excel (.xlsx) de Santander, Galicia, BBVA.")
-        up = st.file_uploader("Arrastrá tu resumen aquí", type=['xlsx', 'csv'])
+        up = st.file_uploader("Excel Santander/Galicia", type=['xlsx', 'csv'])
         if up:
             try:
                 if up.name.endswith('.csv'): df_u = pd.read_csv(up)
@@ -423,9 +413,8 @@ elif "Operaciones" in menu:
                     fc = c1.selectbox("Col. Fecha", df_u.columns)
                     dc = c2.selectbox("Col. Detalle", df_u.columns)
                     mc = c3.selectbox("Col. Pesos", df_u.columns)
-                    if st.form_submit_button("Importar Movimientos", type="primary"):
+                    if st.form_submit_button("Importar"):
                         tid = df_cta[df_cta['nombre']==sel]['id'].values[0]
-                        cnt = 0
                         for _, r in df_u.iterrows():
                             try:
                                 ms = str(r[mc]).replace('$','').replace(' ','')
@@ -434,136 +423,109 @@ elif "Operaciones" in menu:
                                 val = abs(float(ms))
                                 fval = pd.to_datetime(r[fc], dayfirst=True).date()
                                 db_save(fval, val, str(r[dc]), tid, df_cat.iloc[0]['id'], "COMPRA_TARJETA")
-                                cnt += 1
                             except: continue
-                        st.toast(f"✅ Importación completada: {cnt} items.")
-                        time.sleep(2); st.rerun()
-            except Exception as e: st.error(f"Error al leer: {e}")
+                        st.toast("✅ Importado"); time.sleep(1); st.rerun()
+            except Exception as e: st.error(f"Error: {e}")
 
 # ==========================================
 # 4. METAS
 # ==========================================
-elif "Metas" in menu:
-    st.markdown("### 🎯 Objetivos de Ahorro")
+elif menu == "Metas":
+    st.markdown("### 🎯 Metas")
     df_m = get_metas()
-    
-    col_new, col_view = st.columns([1, 2])
-    
-    with col_new:
+    c1, c2 = st.columns([1, 2])
+    with c1:
         with st.container(border=True):
-            st.markdown("#### Nueva Meta")
-            n = st.text_input("Nombre (ej: Auto)")
-            o = st.number_input("Objetivo ($)", min_value=1.0)
-            l = st.date_input("Fecha Límite")
+            st.markdown("##### Nueva Meta")
+            n = st.text_input("Nombre")
+            o = st.number_input("Objetivo", min_value=1.0)
+            l = st.date_input("Límite")
             if st.button("Crear", type="primary", use_container_width=True):
-                save_meta(n, o, l)
-                st.rerun()
-    
-    with col_view:
+                save_meta(n, o, l); st.rerun()
+    with c2:
         if not df_m.empty:
             for _, m in df_m.iterrows():
                 with st.container(border=True):
-                    c1, c2 = st.columns([3,1])
+                    ca, cb = st.columns([3,1])
                     pct = m['ahorrado'] / m['objetivo'] if m['objetivo'] > 0 else 0
-                    c1.markdown(f"**{m['nombre']}**")
-                    c1.progress(min(pct, 1.0))
-                    c1.caption(f"Llevas: {fmt_ars(m['ahorrado'])} de {fmt_ars(m['objetivo'])}")
-                    
-                    new_val = c2.number_input("Ahorrado", value=float(m['ahorrado']), key=f"v_{m['id']}", label_visibility="collapsed")
-                    if c2.button("💾", key=f"s_{m['id']}"):
-                        update_meta_ahorro(m['id'], new_val); st.rerun()
-                    if c2.button("🗑️", key=f"d_{m['id']}"):
-                        delete_meta(m['id']); st.rerun()
-        else:
-            st.info("Aun no hay metas.")
+                    ca.markdown(f"**{m['nombre']}** ({int(pct*100)}%)")
+                    ca.progress(min(pct, 1.0))
+                    nv = cb.number_input("Ahorrado", value=float(m['ahorrado']), key=f"v{m['id']}", label_visibility="collapsed")
+                    if cb.button("💾", key=f"s{m['id']}"): update_meta_ahorro(m['id'], nv); st.rerun()
+                    if cb.button("🗑️", key=f"d{m['id']}"): delete_meta(m['id']); st.rerun()
 
 # ==========================================
 # 5. HISTORIAL
 # ==========================================
-elif "Historial" in menu:
-    st.markdown("### 📝 Gestión de Datos")
+elif menu == "Historial":
+    st.markdown("### 📝 Historial")
+    ver = st.checkbox("Ver todo (histórico)")
+    df_h = get_movimientos(date(2024,1,1), date(2027,1,1)) if ver else get_movimientos(f_ini, f_fin)
     
-    check_col, _ = st.columns([1,3])
-    ver_todo = check_col.checkbox("Ver todo el historial (ignorar mes)")
-    
-    df_h = get_movimientos(date(2024,1,1), date(2027,1,1)) if ver_todo else get_movimientos(f_ini, f_fin)
-    
-    if not ver_todo and not df_h.empty:
-        df_h = df_h[(df_h['fecha'] >= f_ini) & (df_h['fecha'] <= f_fin)]
+    if not ver and not df_h.empty: df_h = df_h[(df_h['fecha'] >= f_ini) & (df_h['fecha'] <= f_fin)]
 
     if not df_h.empty:
-        # UX: Tabla mejorada con column_config
         st.data_editor(
             df_h[['id', 'fecha', 'descripcion', 'monto', 'cuenta', 'categoria', 'tipo']],
             column_config={
                 "monto": st.column_config.NumberColumn("Monto", format="$ %.2f"),
-                "tipo": st.column_config.SelectboxColumn("Tipo", options=["GASTO", "INGRESO", "COMPRA_TARJETA", "PAGO_TARJETA"], width="medium"),
-                "categoria": st.column_config.TextColumn("Categoría", width="medium"),
+                "tipo": st.column_config.SelectboxColumn("Tipo", options=["GASTO", "INGRESO", "COMPRA_TARJETA"], width="medium"),
             },
             use_container_width=True, hide_index=True
         )
-        
-        with st.expander("🗑️ Zona de Borrado"):
-            opciones = {f"{r['fecha']} | {r['descripcion']} | {fmt_ars(r['monto'])}": r['id'] for _, r in df_h.iterrows()}
-            sel = st.selectbox("Seleccionar ítem:", ["..."] + list(opciones.keys()))
-            if st.button("Eliminar Seleccionado") and sel != "...":
-                db_delete(opciones[sel])
-                st.toast("Eliminado")
-                time.sleep(1); st.rerun()
-            
-            st.divider()
-            if st.checkbox("Habilitar Borrado Masivo"):
-                if st.button("🔥 BORRAR TODO LO VISIBLE", type="primary"):
+        with st.expander("Opciones de Borrado"):
+            ops = {f"{r['fecha']} | {r['descripcion']}": r['id'] for _, r in df_h.iterrows()}
+            s = st.selectbox("Elegir:", ["..."] + list(ops.keys()))
+            if st.button("Eliminar") and s != "...": db_delete(ops[s]); st.rerun()
+            if st.checkbox("Borrar TODO"):
+                if st.button("CONFIRMAR BORRADO MASIVO", type="primary"):
                     for _, r in df_h.iterrows(): db_delete(r['id'])
                     st.rerun()
-    else:
-        st.info("No hay datos.")
+    else: st.info("Sin datos.")
 
 # ==========================================
-# 6. CONFIGURACIÓN (TARJETAS + AJUSTES)
+# 6. CONFIGURACIÓN
 # ==========================================
-elif "Tarjetas" in menu:
-    st.markdown("### 💳 Configuración de Tarjetas")
-    df_c = df_cta[df_cta['tipo']=='CREDITO']
-    for _, r in df_c.iterrows():
-        with st.container(border=True):
-            c1, c2, c3, c4 = st.columns([2,1,1,1])
-            c1.markdown(f"**{r['nombre']}**")
-            ci = c2.number_input("Cierre", 1, 31, int(r.get('dia_cierre') or 23), key=f"ci_{r['id']}")
-            vt = c3.number_input("Vto", 1, 31, int(r.get('dia_vencimiento') or 5), key=f"vt_{r['id']}")
-            if c4.button("Guardar", key=f"bt_{r['id']}"):
-                supabase.table("cuentas").update({"dia_cierre": ci, "dia_vencimiento": vt}).eq("id", r['id']).execute()
-                st.toast("Guardado"); time.sleep(1)
+elif menu == "Tarjetas":
+    st.markdown("### 💳 Tarjetas")
+    t1, t2 = st.tabs(["Fechas", "Importar"])
+    with t1:
+        for _, r in df_cta[df_cta['tipo']=='CREDITO'].iterrows():
+            with st.container(border=True):
+                c1, c2, c3, c4 = st.columns([2,1,1,1])
+                c1.write(f"**{r['nombre']}**")
+                ci = c2.number_input("Cierre", 1, 31, int(r.get('dia_cierre') or 23), key=f"c{r['id']}")
+                vt = c3.number_input("Vto", 1, 31, int(r.get('dia_vencimiento') or 5), key=f"v{r['id']}")
+                if c4.button("💾", key=f"b{r['id']}"):
+                    supabase.table("cuentas").update({"dia_cierre": ci, "dia_vencimiento": vt}).eq("id", r['id']).execute()
+                    st.toast("Guardado"); time.sleep(1)
 
-elif "Ajustes" in menu:
-    st.markdown("### ⚙️ Preferencias")
-    
+elif menu == "Configuración":
+    st.markdown("### ⚙️ Ajustes")
     with st.container(border=True):
-        st.markdown("#### 💰 Ingreso Base")
-        n_s = st.number_input("Sueldo Neto Mensual", value=int(sueldo_base), step=1000)
-        if st.button("Actualizar Sueldo"):
-            supabase.table("configuracion").upsert({"clave": "sueldo_mensual", "valor": str(n_s)}).execute()
-            st.toast("Sueldo actualizado")
+        st.write("Sueldo Base")
+        ns = st.number_input("Neto Mensual", value=int(sueldo_base), label_visibility="collapsed")
+        if st.button("Actualizar"):
+            supabase.table("configuracion").upsert({"clave": "sueldo_mensual", "valor": str(ns)}).execute()
+            st.toast("Actualizado")
     
-    st.markdown("#### 🔄 Gestión de Recurrentes")
-    with st.container(border=True):
-        with st.form("add_sus"):
-            c1, c2, c3, c4 = st.columns(4)
-            sd = c1.text_input("Servicio (ej: Internet)")
-            sm = c2.number_input("Monto", min_value=0.0)
-            sc = c3.selectbox("Pago", df_cta['nombre'].tolist())
-            sca = c4.selectbox("Rubro", df_cat['nombre'].tolist())
-            if st.form_submit_button("Agregar"):
-                sidc = df_cta[df_cta['nombre']==sc]['id'].values[0]
-                sidca = df_cat[df_cat['nombre']==sca]['id'].values[0]
-                stipo = "COMPRA_TARJETA" if df_cta[df_cta['nombre']==sc]['tipo'].values[0]=='CREDITO' else "GASTO"
-                save_suscripcion(sd, sm, sidc, sidca, stipo)
-                st.rerun()
-        
-        df_s = get_suscripciones()
-        if not df_s.empty:
-            st.dataframe(df_s[['descripcion', 'monto']], use_container_width=True, hide_index=True)
-            ds = st.selectbox("Borrar:", ["..."] + df_s['descripcion'].tolist())
-            if st.button("Eliminar") and ds != "...":
-                did = df_s[df_s['descripcion']==ds]['id'].values[0]
-                delete_suscripcion(did); st.rerun()
+    st.markdown("#### Fijos / Recurrentes")
+    with st.form("new_sus"):
+        c1, c2, c3 = st.columns([2,1,1])
+        sd = c1.text_input("Desc")
+        sm = c2.number_input("Monto", min_value=0.0)
+        sc = c3.selectbox("Pago", df_cta['nombre'].tolist())
+        if st.form_submit_button("Agregar"):
+            sidc = df_cta[df_cta['nombre']==sc]['id'].values[0]
+            sca = df_cat.iloc[0]['id'] # Default cat
+            estipo = "COMPRA_TARJETA" if df_cta[df_cta['nombre']==sc]['tipo'].values[0]=='CREDITO' else "GASTO"
+            save_suscripcion(sd, sm, sidc, sca, estipo)
+            st.rerun()
+    
+    df_s = get_suscripciones()
+    if not df_s.empty:
+        st.dataframe(df_s[['descripcion', 'monto']], use_container_width=True, hide_index=True)
+        ds = st.selectbox("Borrar:", ["..."] + df_s['descripcion'].tolist())
+        if st.button("Eliminar Fijo") and ds != "...":
+            did = df_s[df_s['descripcion']==ds]['id'].values[0]
+            delete_suscripcion(did); st.rerun()
