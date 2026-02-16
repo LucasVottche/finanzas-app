@@ -8,25 +8,19 @@ from dateutil.relativedelta import relativedelta
 
 from fastapi import FastAPI
 from supabase import create_client
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
 # ==========================================
 # 1. CONFIGURACIÓN
 # ==========================================
-# Variables de entorno de Render
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
-# Usamos SERVICE_ROLE_KEY para que el bot tenga permisos de escritura totales
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_KEY")
-# Tu variable en Render se llama TELEGRAM_SECRET, así que la leemos de ahí
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_SECRET")
-# Tu ID numérico de Telegram por seguridad (opcional pero recomendado)
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_SECRET") or os.environ.get("TELEGRAM_TOKEN")
 ALLOWED_USER_ID = os.environ.get("ALLOWED_USER_ID")
 
-# Inicializar Supabase
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Logs
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -34,54 +28,83 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==========================================
-# 2. FUNCIONES DE AYUDA (Lógica de Negocio)
+# 2. FUNCIONES DE AYUDA
 # ==========================================
+def fmt_money(val):
+    return f"${val:,.0f}".replace(",", ".")
+
 def get_account_by_name(name):
-    """Busca una cuenta por nombre. Si no encuentra, devuelve Efectivo o la primera."""
     try:
         res = supabase.table("cuentas").select("*").execute()
         cuentas = res.data or []
-        
-        # 1. Búsqueda exacta/parcial
         for acc in cuentas:
-            if name.lower() in acc['nombre'].lower():
-                return acc
-        
-        # 2. Si no encuentra y no se especificó nada, busca 'Efectivo'
+            if name.lower() in acc['nombre'].lower(): return acc
         for acc in cuentas:
-            if "efectivo" in acc['nombre'].lower():
-                return acc
-                
-        # 3. Fallback: la primera que encuentre
+            if "efectivo" in acc['nombre'].lower(): return acc
         return cuentas[0] if cuentas else None
-    except Exception as e:
-        logger.error(f"Error buscando cuenta: {e}")
-        return None
+    except: return None
 
 def get_category_general():
-    """Busca la categoría General o Varios."""
     try:
         res = supabase.table("categorias").select("*").execute()
         cats = res.data or []
         for cat in cats:
-            if "general" in cat['nombre'].lower() or "varios" in cat['nombre'].lower():
-                return cat
+            if "general" in cat['nombre'].lower(): return cat
         return cats[0] if cats else None
+    except: return None
+
+def get_monthly_balance():
+    """Calcula Ingresos vs Gastos del mes actual."""
+    try:
+        today = date.today()
+        first_day = date(today.year, today.month, 1)
+        last_day = first_day + relativedelta(months=1) - timedelta(days=1)
+        
+        # Consultamos movimientos del mes
+        res = supabase.table("movimientos")\
+            .select("tipo, monto")\
+            .gte("fecha", str(first_day))\
+            .lte("fecha", str(last_day))\
+            .execute()
+        
+        data = res.data or []
+        ingresos = sum(d['monto'] for d in data if d['tipo'] == 'INGRESO')
+        gastos = sum(d['monto'] for d in data if d['tipo'] in ['GASTO', 'COMPRA_TARJETA']) # Asumimos compra tarjeta impacta consumo
+        
+        return ingresos, gastos
     except Exception as e:
-        logger.error(f"Error buscando categoría: {e}")
-        return None
+        logger.error(f"Error balance: {e}")
+        return 0, 0
 
 # ==========================================
-# 3. LÓGICA DEL BOT DE TELEGRAM
+# 3. HANDLERS (COMANDOS Y BOTONES)
 # ==========================================
+
+async def show_menu(update: Update):
+    """Muestra el teclado persistente."""
+    keyboard = [
+        [KeyboardButton("💰 Balance Mes"), KeyboardButton("❓ Ayuda")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text("¿Qué quieres hacer?", reply_markup=reply_markup)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 **Bot Finanzas Pro Activo**\n\n"
-        "Ejemplos:\n"
-        "⚡ `2500 Cafe` (Gasto hoy)\n"
-        "📅 `15000 Super 2026-03-10` (Carga en fecha específica)\n"
-        "💳 `50000 Nafta Visa` (Detecta tarjeta y crea cuota)"
+        "👋 **Bot Finanzas Pro**\n\n"
+        "Escribe un gasto (ej: `1500 Cena`) o usa los botones de abajo."
     )
+    await show_menu(update)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "💡 **Guía Rápida:**\n\n"
+        "1️⃣ **Carga Simple:** `1500 Super`\n"
+        "2️⃣ **Fecha Específica:** `50000 Alquiler 2026-04-01`\n"
+        "3️⃣ **Tarjeta:** `25000 Zapatillas Visa`\n"
+        "4️⃣ **Ingreso:** Para ingresos usa la App web por ahora, o configura una palabra clave.\n\n"
+        "Los botones de abajo te dan info rápida."
+    )
+    await update.message.reply_text(msg)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1. Seguridad
@@ -91,20 +114,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
-    
-    # 2. Extraer Monto (Busca el primer número)
-    match_monto = re.search(r'(\d+([.,]\d{1,2})?)', text)
-    if not match_monto:
-        await update.message.reply_text("🤷‍♂️ No entendí el monto. Ejemplo: '2500 Coto'.")
+
+    # --- LÓGICA DE BOTONES (Texto exacto) ---
+    if text == "💰 Balance Mes":
+        ing, gas = get_monthly_balance()
+        neto = ing - gas
+        await update.message.reply_text(
+            f"📅 **Balance {date.today().strftime('%B').title()}**\n\n"
+            f"📥 Ingresos: {fmt_money(ing)}\n"
+            f"🛒 Consumo:  {fmt_money(gas)}\n"
+            f"-------------------\n"
+            f"💵 **Neto: {fmt_money(neto)}**"
+        )
         return
 
-    monto_str = match_monto.group(1).replace(',', '.')
-    monto = float(monto_str)
-    
-    # Limpiar texto para buscar el resto
+    if text == "❓ Ayuda":
+        await help_command(update, context)
+        return
+
+    # --- LÓGICA DE CARGA (Tu lógica original) ---
+    match_monto = re.search(r'(\d+([.,]\d{1,2})?)', text)
+    if not match_monto:
+        await update.message.reply_text("🤷‍♂️ No entendí. Escribe el monto primero (ej: `2500 Taxi`).")
+        return
+
+    monto = float(match_monto.group(1).replace(',', '.'))
     clean_text = text.replace(match_monto.group(0), '').strip()
     
-    # 3. Extraer Fecha (Formato YYYY-MM-DD para cargar al mes que quieras)
     fecha_gasto = date.today()
     match_date = re.search(r'(\d{4}-\d{2}-\d{2})', clean_text)
     if match_date:
@@ -114,11 +150,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clean_text = clean_text.replace(fecha_str, '').strip()
         except: pass
 
-    # 4. Detectar Cuenta (Busca palabras clave)
-    # Por defecto 'Efectivo'
     target_account = None
-    
-    # Obtenemos todas las cuentas para comparar
     try:
         all_accounts_res = supabase.table("cuentas").select("nombre, id, tipo").execute()
         all_accounts = all_accounts_res.data or []
@@ -127,7 +159,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     words = clean_text.split()
     desc_words = []
     
-    # Separamos palabras de la descripción y la cuenta
     for word in words:
         is_acc_name = False
         if all_accounts:
@@ -139,7 +170,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_acc_name:
             desc_words.append(word)
     
-    # Si no encontró cuenta explícita, usa Efectivo
     if not target_account:
         target_account = get_account_by_name("Efectivo")
 
@@ -147,15 +177,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     categoria = get_category_general()
 
     if not target_account or not categoria:
-        await update.message.reply_text("❌ Error: No hay cuentas o categorías en la BD.")
+        await update.message.reply_text("❌ Error: Faltan cuentas/categorías en DB.")
         return
 
-    # 5. Guardar en Supabase
     try:
-        es_credito = target_account['tipo'] == 'CREDITO'
-        
-        if es_credito:
-            # COMPRA TARJETA (Genera compra + 1 cuota)
+        if target_account['tipo'] == 'CREDITO':
             compra = supabase.table("compras_tarjeta").insert({
                 "fecha_compra": str(fecha_gasto),
                 "monto_total": monto,
@@ -168,20 +194,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }).execute()
             
             if compra.data:
-                compra_id = compra.data[0]['id']
                 supabase.table("cuotas_tarjeta").insert({
-                    "compra_id": compra_id,
+                    "compra_id": compra.data[0]['id'],
                     "nro_cuota": 1,
-                    "fecha_cuota": str(fecha_gasto), # Impacta en el resumen de esta fecha
+                    "fecha_cuota": str(fecha_gasto),
                     "monto_cuota": monto,
                     "estado": "pendiente"
                 }).execute()
-                await update.message.reply_text(f"💳 **Compra Tarjeta**\nDesc: {descripcion}\nMonto: ${monto}\nFecha: {fecha_gasto}\nCuenta: {target_account['nombre']}")
-            else:
-                await update.message.reply_text("❌ Error creando compra tarjeta.")
-                
+                await update.message.reply_text(f"💳 **Tarjeta**\n{descripcion}: {fmt_money(monto)}\n({target_account['nombre']})")
         else:
-            # GASTO NORMAL (Cash/Débito)
             supabase.table("movimientos").insert({
                 "fecha": str(fecha_gasto),
                 "monto": monto,
@@ -191,68 +212,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "tipo": "GASTO",
                 "source": "telegram_bot"
             }).execute()
-            
-            await update.message.reply_text(f"✅ **Gasto Guardado**\nDesc: {descripcion}\nMonto: ${monto}\nFecha: {fecha_gasto}\nCuenta: {target_account['nombre']}")
+            await update.message.reply_text(f"✅ **Guardado**\n{descripcion}: {fmt_money(monto)}\n({target_account['nombre']})")
 
     except Exception as e:
         logger.error(f"Error DB: {e}")
-        await update.message.reply_text(f"❌ Error interno: {str(e)}")
+        await update.message.reply_text("❌ Error guardando.")
 
 # ==========================================
-# 4. GESTIÓN DEL CICLO DE VIDA (FastAPI + Bot)
+# 4. LIFESPAN & APP
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- ARRANQUE ---
     if not TELEGRAM_TOKEN:
-        logger.error("No se encontró TELEGRAM_SECRET. El bot no arrancará.")
+        logger.error("Falta TELEGRAM_TOKEN")
         yield
         return
 
-    # Crear la aplicación del bot
     bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    # Añadir manejadores
+    # Comandos
     bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(CommandHandler("saldo", lambda u,c: handle_message(u._replace(message=u.message._replace(text="💰 Balance Mes")), c)))
+    bot_app.add_handler(CommandHandler("ayuda", help_command))
+    
+    # Mensajes de texto (y botones)
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Inicializar el bot
     await bot_app.initialize()
-    
-    # --- FIX IMPORTANTE: Limpiar webhooks previos ---
-    # Esto soluciona el error "Conflict: terminated by other getUpdates request"
     try:
         await bot_app.bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Webhook eliminado correctamente.")
-    except Exception as e:
-        logger.warning(f"No se pudo eliminar el webhook (no es crítico si ya estaba polling): {e}")
-
-    # Arrancar el bot
+    except: pass
+    
     await bot_app.start()
-    
-    # Comenzar el polling
     await bot_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("🤖 Bot con Botones iniciado!")
     
-    logger.info("🤖 Bot de Telegram iniciado correctamente!")
+    yield
     
-    yield # Aquí FastAPI ejecuta el servidor web (Keep-Alive)
-    
-    # --- APAGADO ---
-    logger.info("🛑 Deteniendo Bot de Telegram...")
-    try:
-        if bot_app.updater.running:
-            await bot_app.updater.stop()
-        if bot_app.running:
-            await bot_app.stop()
-        await bot_app.shutdown()
-    except Exception as e:
-        logger.error(f"Error al apagar: {e}")
+    await bot_app.updater.stop()
+    await bot_app.stop()
+    await bot_app.shutdown()
 
-# ==========================================
-# 5. APP FASTAPI (Keep-Alive para Render)
-# ==========================================
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "bot": "running"}
+    return {"status": "ok", "bot": "interactive"}
