@@ -9,6 +9,7 @@ from dateutil.relativedelta import relativedelta
 from fastapi import FastAPI
 from supabase import create_client
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
 # ==========================================
@@ -54,13 +55,11 @@ def get_category_general():
     except: return None
 
 def get_monthly_balance():
-    """Calcula Ingresos vs Gastos del mes actual."""
     try:
         today = date.today()
         first_day = date(today.year, today.month, 1)
         last_day = first_day + relativedelta(months=1) - timedelta(days=1)
         
-        # Consultamos movimientos del mes
         res = supabase.table("movimientos")\
             .select("tipo, monto")\
             .gte("fecha", str(first_day))\
@@ -69,7 +68,7 @@ def get_monthly_balance():
         
         data = res.data or []
         ingresos = sum(d['monto'] for d in data if d['tipo'] == 'INGRESO')
-        gastos = sum(d['monto'] for d in data if d['tipo'] in ['GASTO', 'COMPRA_TARJETA']) # Asumimos compra tarjeta impacta consumo
+        gastos = sum(d['monto'] for d in data if d['tipo'] in ['GASTO', 'COMPRA_TARJETA'])
         
         return ingresos, gastos
     except Exception as e:
@@ -89,25 +88,27 @@ async def show_menu(update: Update):
     await update.message.reply_text("¿Qué quieres hacer?", reply_markup=reply_markup)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Nota: Usamos * para negrita en Markdown de Telegram
     await update.message.reply_text(
-        "👋 **Bot Finanzas Pro**\n\n"
-        "Escribe un gasto (ej: `1500 Cena`) o usa los botones de abajo."
+        "👋 *Bot Finanzas Pro*\n\n"
+        "Escribe un gasto (ej: `1500 Cena`) o usa los botones de abajo.",
+        parse_mode=ParseMode.MARKDOWN
     )
     await show_menu(update)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Aquí corregimos los asteriscos dobles (**) por simples (*)
     msg = (
-        "💡 **Guía Rápida:**\n\n"
-        "1️⃣ **Carga Simple:** `1500 Super`\n"
-        "2️⃣ **Fecha Específica:** `50000 Alquiler 2026-04-01`\n"
-        "3️⃣ **Tarjeta:** `25000 Zapatillas Visa`\n"
-        "4️⃣ **Ingreso:** Para ingresos usa la App web por ahora, o configura una palabra clave.\n\n"
-        "Los botones de abajo te dan info rápida."
+        "💡 *Guía Rápida:*\n\n"
+        "1️⃣ *Carga Simple:* `1500 Super`\n"
+        "2️⃣ *Fecha Específica:* `50000 Alquiler 2026-04-01`\n"
+        "3️⃣ *Tarjeta:* `25000 Zapatillas Visa`\n"
+        "4️⃣ *Ingreso:* Usa la App web o configura una palabra clave.\n\n"
+        "_Toca los botones de abajo para ver tu saldo._"
     )
-    await update.message.reply_text(msg)
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. Seguridad
     user_id = str(update.effective_user.id)
     if ALLOWED_USER_ID and user_id != str(ALLOWED_USER_ID):
         await update.message.reply_text("⛔ No autorizado.")
@@ -115,16 +116,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text
 
-    # --- LÓGICA DE BOTONES (Texto exacto) ---
+    # --- BOTONES ---
     if text == "💰 Balance Mes":
         ing, gas = get_monthly_balance()
         neto = ing - gas
+        # Usamos Markdown para formatear el balance
         await update.message.reply_text(
-            f"📅 **Balance {date.today().strftime('%B').title()}**\n\n"
-            f"📥 Ingresos: {fmt_money(ing)}\n"
-            f"🛒 Consumo:  {fmt_money(gas)}\n"
+            f"📅 *Balance {date.today().strftime('%B').title()}*\n\n"
+            f"📥 Ingresos: `{fmt_money(ing)}`\n"
+            f"🛒 Consumo:  `{fmt_money(gas)}`\n"
             f"-------------------\n"
-            f"💵 **Neto: {fmt_money(neto)}**"
+            f"💵 *Neto: {fmt_money(neto)}*",
+            parse_mode=ParseMode.MARKDOWN
         )
         return
 
@@ -132,10 +135,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await help_command(update, context)
         return
 
-    # --- LÓGICA DE CARGA (Tu lógica original) ---
+    # --- PROCESAR GASTO ---
     match_monto = re.search(r'(\d+([.,]\d{1,2})?)', text)
     if not match_monto:
-        await update.message.reply_text("🤷‍♂️ No entendí. Escribe el monto primero (ej: `2500 Taxi`).")
+        await update.message.reply_text("🤷‍♂️ No entendí. Escribe el monto primero (ej: `2500 Taxi`).", parse_mode=ParseMode.MARKDOWN)
         return
 
     monto = float(match_monto.group(1).replace(',', '.'))
@@ -201,7 +204,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "monto_cuota": monto,
                     "estado": "pendiente"
                 }).execute()
-                await update.message.reply_text(f"💳 **Tarjeta**\n{descripcion}: {fmt_money(monto)}\n({target_account['nombre']})")
+                await update.message.reply_text(
+                    f"💳 *Tarjeta Detectada*\n\n"
+                    f"📝 *Desc:* {descripcion}\n"
+                    f"💲 *Monto:* `{fmt_money(monto)}`\n"
+                    f"🏦 *Cuenta:* {target_account['nombre']}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
         else:
             supabase.table("movimientos").insert({
                 "fecha": str(fecha_gasto),
@@ -212,7 +221,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "tipo": "GASTO",
                 "source": "telegram_bot"
             }).execute()
-            await update.message.reply_text(f"✅ **Guardado**\n{descripcion}: {fmt_money(monto)}\n({target_account['nombre']})")
+            await update.message.reply_text(
+                f"✅ *Gasto Guardado*\n\n"
+                f"📝 {descripcion}\n"
+                f"💲 `{fmt_money(monto)}`\n"
+                f"🏦 {target_account['nombre']}\n"
+                f"📅 {fecha_gasto}",
+                parse_mode=ParseMode.MARKDOWN
+            )
 
     except Exception as e:
         logger.error(f"Error DB: {e}")
@@ -230,12 +246,9 @@ async def lifespan(app: FastAPI):
 
     bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    # Comandos
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("saldo", lambda u,c: handle_message(u._replace(message=u.message._replace(text="💰 Balance Mes")), c)))
     bot_app.add_handler(CommandHandler("ayuda", help_command))
-    
-    # Mensajes de texto (y botones)
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     await bot_app.initialize()
