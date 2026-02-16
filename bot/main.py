@@ -76,8 +76,21 @@ def get_monthly_balance():
         return 0, 0
 
 # ==========================================
-# 3. HANDLERS (COMANDOS Y BOTONES)
+# 3. LÓGICA REUTILIZABLE
 # ==========================================
+
+async def reply_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Función dedicada a enviar el saldo."""
+    ing, gas = get_monthly_balance()
+    neto = ing - gas
+    await update.message.reply_text(
+        f"📅 *Balance {date.today().strftime('%B').title()}*\n\n"
+        f"📥 Ingresos: `{fmt_money(ing)}`\n"
+        f"🛒 Consumo:  `{fmt_money(gas)}`\n"
+        f"-------------------\n"
+        f"💵 *Neto: {fmt_money(neto)}*",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def show_menu(update: Update):
     """Muestra el teclado persistente."""
@@ -87,8 +100,11 @@ async def show_menu(update: Update):
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("¿Qué quieres hacer?", reply_markup=reply_markup)
 
+# ==========================================
+# 4. HANDLERS (COMANDOS Y MENSAJES)
+# ==========================================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Nota: Usamos * para negrita en Markdown de Telegram
     await update.message.reply_text(
         "👋 *Bot Finanzas Pro*\n\n"
         "Escribe un gasto (ej: `1500 Cena`) o usa los botones de abajo.",
@@ -97,7 +113,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_menu(update)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Aquí corregimos los asteriscos dobles (**) por simples (*)
     msg = (
         "💡 *Guía Rápida:*\n\n"
         "1️⃣ *Carga Simple:* `1500 Super`\n"
@@ -118,17 +133,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- BOTONES ---
     if text == "💰 Balance Mes":
-        ing, gas = get_monthly_balance()
-        neto = ing - gas
-        # Usamos Markdown para formatear el balance
-        await update.message.reply_text(
-            f"📅 *Balance {date.today().strftime('%B').title()}*\n\n"
-            f"📥 Ingresos: `{fmt_money(ing)}`\n"
-            f"🛒 Consumo:  `{fmt_money(gas)}`\n"
-            f"-------------------\n"
-            f"💵 *Neto: {fmt_money(neto)}*",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await reply_balance(update, context) # Llamada directa a la función corregida
         return
 
     if text == "❓ Ayuda":
@@ -235,7 +240,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error guardando.")
 
 # ==========================================
-# 4. LIFESPAN & APP
+# 5. LIFESPAN & APP
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -246,9 +251,16 @@ async def lifespan(app: FastAPI):
 
     bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
+    # Comandos
     bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(CommandHandler("saldo", lambda u,c: handle_message(u._replace(message=u.message._replace(text="💰 Balance Mes")), c)))
+    
+    # AQUÍ ESTÁ EL ARREGLO:
+    # En lugar de usar una lambda compleja con _replace, llamamos directamente a la función
+    bot_app.add_handler(CommandHandler("saldo", reply_balance))
+    
     bot_app.add_handler(CommandHandler("ayuda", help_command))
+    
+    # Mensajes de texto (y botones)
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     await bot_app.initialize()
