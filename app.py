@@ -235,50 +235,48 @@ elif menu == "💳 Tarjetas":
 elif menu == "📝 Historial":
     st.title("Gestión de Movimientos")
     
-    # 1. Filtro de datos del mes actual
-    df_h = get_movimientos(f_ini, f_fin)
-    if not df_h.empty:
-        df_h = df_h[(df_h['fecha'] >= f_ini) & (df_h['fecha'] <= f_fin)]
+    # Checkbox para ignorar el filtro de mes del sidebar
+    ver_todo = st.checkbox("🔍 Ver TODOS los movimientos (ignorar filtro de mes)")
     
-    # --- UX: TABS PARA BORRAR ---
-    tab_edit, tab_borrar = st.tabs(["📊 Ver / Editar", "🗑️ Borrado Masivo"])
+    if ver_todo:
+        # Traemos absolutamente todo
+        df_h = get_movimientos(date(2024,1,1), date(2027,1,1))
+    else:
+        df_h = get_movimientos(f_ini, f_fin)
+        if not df_h.empty:
+            df_h = df_h[(df_h['fecha'] >= f_ini) & (df_h['fecha'] <= f_fin)]
+
+    tab_edit, tab_borrar = st.tabs(["📊 Ver / Editar", "🗑️ Borrado"])
     
     with tab_edit:
         if not df_h.empty:
-            st.info("💡 Podés editar montos y descripciones directo en la tabla.")
-            st.data_editor(df_h[['fecha', 'descripcion', 'monto', 'cuenta', 'categoria', 'tipo']], use_container_width=True, hide_index=True)
-            
-            st.divider()
-            st.subheader("Borrar uno por uno")
-            col_sel, col_btn = st.columns([3, 1])
-            sel_del = col_sel.selectbox("Seleccioná el movimiento a eliminar:", ["Seleccionar..."] + df_h['descripcion'].tolist(), key="single_del")
-            if col_btn.button("Borrar Seleccionado", type="primary", use_container_width=True) and sel_del != "Seleccionar...":
-                id_del = df_h[df_h['descripcion'] == sel_del]['id'].values[0]
-                db_delete(id_del)
-                st.success(f"Eliminado: {sel_del}")
-                time.sleep(1)
-                st.rerun()
+            st.data_editor(df_h[['id', 'fecha', 'descripcion', 'monto', 'cuenta', 'tipo']], 
+                           use_container_width=True, hide_index=True, key="editor_universal")
         else:
-            st.write("No hay datos para mostrar en este mes.")
+            st.info("No hay movimientos para mostrar.")
 
     with tab_borrar:
-        st.warning(f"### 🚨 Zona de Peligro: {f_ini.strftime('%B %Y')}")
-        st.write(f"Esta acción borrará **TODOS** los movimientos registrados o planificados para el mes de {f_ini.strftime('%B')}.")
-        
-        col_check, col_btn_all = st.columns([2, 1])
-        confirm = col_check.checkbox("Confirmo que quiero borrar TODO el mes")
-        
-        if col_btn_all.button("BORRAR TODO EL MES", type="primary", use_container_width=True, disabled=not confirm):
-            if not df_h.empty:
-                count = 0
-                for _, row in df_h.iterrows():
-                    db_delete(row['id'])
-                    count += 1
-                st.success(f"Se eliminaron {count} registros correctamente.")
-                time.sleep(2)
+        if not df_h.empty:
+            st.subheader("Eliminar movimientos específicos")
+            # Lista desplegable con ID y Descripción para no borrar lo que no queremos
+            opciones_borrar = {f"{r['fecha']} - {r['descripcion']} ({fmt_ars(r['monto'])})": r['id'] for _, r in df_h.iterrows()}
+            seleccion = st.selectbox("Seleccioná qué querés borrar:", ["Seleccionar..."] + list(opciones_borrar.keys()))
+            
+            if st.button("Eliminar Permanentemente", type="primary") and seleccion != "Seleccionar...":
+                id_a_borrar = opciones_borrar[seleccion]
+                db_delete(id_a_borrar)
+                st.success(f"Eliminado correctamente.")
+                time.sleep(1)
                 st.rerun()
-            else:
-                st.info("No hay nada para borrar en este mes.")
+                
+            st.divider()
+            if st.checkbox("🚨 Habilitar borrado masivo de la vista actual"):
+                if st.button(f"BORRAR LOS {len(df_h)} REGISTROS VISIBLES", type="primary"):
+                    for _, row in df_h.iterrows():
+                        db_delete(row['id'])
+                    st.success("Limpieza total completada.")
+                    time.sleep(2)
+                    st.rerun()
 
 # --- 6. AJUSTES ---
 elif menu == "⚙️ Ajustes":
