@@ -129,7 +129,7 @@ if menu == "📊 Dashboard":
                 st.plotly_chart(fig, use_container_width=True)
         with col_g2:
             if not df_mes.empty:
-                fig_p = px.pie(df_mes[df_mes['tipo'].isin(['GASTO', 'COMPRA_TAR_JETA'])], values='monto', names='categoria', hole=0.5, title="Rubros")
+                fig_p = px.pie(df_mes[df_mes['tipo'].isin(['GASTO', 'COMPRA_TARJETA'])], values='monto', names='categoria', hole=0.5, title="Rubros")
                 st.plotly_chart(fig_p, use_container_width=True)
     else:
         st.info("Sin datos.")
@@ -155,7 +155,7 @@ elif menu == "📅 Planificador":
                 if r['Monto'] > 0:
                     c_id = df_cta[df_cta['nombre'] == r['Pago']]['id'].values[0]
                     tp = "COMPRA_TARJETA" if df_cta[df_cta['nombre'] == r['Pago']]['tipo'].values[0] == 'CREDITO' else "GASTO"
-                    db_save(f_ini + timedelta(days=5), r['Monto'], r['Descripción'], c_id, df_cat[df_cat['nombre'] == r['Categoría']]['id'].values[0], tp)
+                    db_save(f_ini + timedelta(days=4), r['Monto'], r['Descripción'], c_id, df_cat[df_cat['nombre'] == r['Categoría']]['id'].values[0], tp)
             st.success("Plan guardado!"); time.sleep(1); st.rerun()
 
 # --- 3. CARGAR (MANUAL) ---
@@ -198,7 +198,6 @@ elif menu == "💳 Tarjetas":
                 if up.name.endswith('.csv'):
                     df_up = pd.read_csv(up)
                 else:
-                    # Buscador de cabecera para Santander
                     df_raw = pd.read_excel(up)
                     header_row = 0
                     for i in range(len(df_raw)):
@@ -221,7 +220,6 @@ elif menu == "💳 Tarjetas":
                         id_tj = df_cta[df_cta['nombre'] == sel]['id'].values[0]
                         for _, row in df_up.iterrows():
                             try:
-                                # Limpieza de montos compleja (Pesos Santander)
                                 m_str = str(row[m_c]).replace('$','').replace(' ','')
                                 if ',' in m_str and '.' in m_str: m_str = m_str.replace('.','').replace(',','.')
                                 elif ',' in m_str: m_str = m_str.replace(',','.')
@@ -233,18 +231,54 @@ elif menu == "💳 Tarjetas":
                         st.success("Importado"); time.sleep(1); st.rerun()
             except Exception as e: st.error(f"Error: {e}")
 
-# --- 5. HISTORIAL ---
+# --- 5. HISTORIAL Y BORRADO ---
 elif menu == "📝 Historial":
-    st.title("Historial")
+    st.title("Gestión de Movimientos")
+    
+    # 1. Filtro de datos del mes actual
     df_h = get_movimientos(f_ini, f_fin)
     if not df_h.empty:
         df_h = df_h[(df_h['fecha'] >= f_ini) & (df_h['fecha'] <= f_fin)]
-        sel_del = st.selectbox("Borrar un movimiento", ["Seleccionar..."] + df_h['descripcion'].tolist())
-        if sel_del != "Seleccionar...":
-            id_del = df_h[df_h['descripcion'] == sel_del]['id'].values[0]
-            if st.button("Eliminar", type="primary"):
-                db_delete(id_del); st.success("Borrado"); time.sleep(1); st.rerun()
-        st.data_editor(df_h[['fecha', 'descripcion', 'monto', 'cuenta', 'categoria', 'tipo']], use_container_width=True)
+    
+    # --- UX: TABS PARA BORRAR ---
+    tab_edit, tab_borrar = st.tabs(["📊 Ver / Editar", "🗑️ Borrado Masivo"])
+    
+    with tab_edit:
+        if not df_h.empty:
+            st.info("💡 Podés editar montos y descripciones directo en la tabla.")
+            st.data_editor(df_h[['fecha', 'descripcion', 'monto', 'cuenta', 'categoria', 'tipo']], use_container_width=True, hide_index=True)
+            
+            st.divider()
+            st.subheader("Borrar uno por uno")
+            col_sel, col_btn = st.columns([3, 1])
+            sel_del = col_sel.selectbox("Seleccioná el movimiento a eliminar:", ["Seleccionar..."] + df_h['descripcion'].tolist(), key="single_del")
+            if col_btn.button("Borrar Seleccionado", type="primary", use_container_width=True) and sel_del != "Seleccionar...":
+                id_del = df_h[df_h['descripcion'] == sel_del]['id'].values[0]
+                db_delete(id_del)
+                st.success(f"Eliminado: {sel_del}")
+                time.sleep(1)
+                st.rerun()
+        else:
+            st.write("No hay datos para mostrar en este mes.")
+
+    with tab_borrar:
+        st.warning(f"### 🚨 Zona de Peligro: {f_ini.strftime('%B %Y')}")
+        st.write(f"Esta acción borrará **TODOS** los movimientos registrados o planificados para el mes de {f_ini.strftime('%B')}.")
+        
+        col_check, col_btn_all = st.columns([2, 1])
+        confirm = col_check.checkbox("Confirmo que quiero borrar TODO el mes")
+        
+        if col_btn_all.button("BORRAR TODO EL MES", type="primary", use_container_width=True, disabled=not confirm):
+            if not df_h.empty:
+                count = 0
+                for _, row in df_h.iterrows():
+                    db_delete(row['id'])
+                    count += 1
+                st.success(f"Se eliminaron {count} registros correctamente.")
+                time.sleep(2)
+                st.rerun()
+            else:
+                st.info("No hay nada para borrar en este mes.")
 
 # --- 6. AJUSTES ---
 elif menu == "⚙️ Ajustes":
