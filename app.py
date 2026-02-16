@@ -6,39 +6,61 @@ from dateutil.relativedelta import relativedelta
 import plotly.express as px
 import time
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Finanzas Lucas", page_icon="💳", layout="wide")
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(
+    page_title="Finanzas Personales", 
+    page_icon="💳", 
+    layout="wide"
+)
 
-# --- CONEXIÓN ---
+# --- CONEXIÓN SUPABASE ---
 @st.cache_resource
 def init_connection():
     try:
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
         return create_client(url, key)
-    except: st.stop()
+    except Exception as e:
+        st.error(f"Error de conexión: {e}")
+        st.stop()
 
 supabase = init_connection()
 
-# --- UTILIDADES ARGENTINA ---
+# --- FUNCIONES DE FORMATO ARGENTINO ---
 def fmt_ars(valor):
     if valor is None: valor = 0
-    s = f"{valor:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-    return f"${s[:-3]}" if s.endswith(",00") else f"${s}"
+    s = f"{valor:,.2f}"
+    s = s.replace(',', 'X').replace('.', ',').replace('X', '.')
+    if s.endswith(",00"): s = s[:-3]
+    return f"${s}"
 
-def calcular_mes_pago(fecha_gasto, dia_cierre):
+# --- FUNCIONES LOGICA TARJETA ---
+def calcular_fecha_vencimiento(fecha_compra, dia_cierre, dia_vencimiento):
     """
-    Si cierre es 23 y gasto el 15/02 -> Paga en Marzo (03)
-    Si cierre es 23 y gasto el 25/02 -> Paga en Abril (04)
+    Calcula cuándo vence una compra basada en el cierre de la tarjeta.
+    Ej: Cierre 23, Vto 5.
+    Compra 15/02 (antes cierre) -> Vence 05/03
+    Compra 25/02 (después cierre) -> Vence 05/04
     """
-    f = pd.to_datetime(fecha_gasto)
-    if f.day <= dia_cierre:
-        # Entra en el vencimiento del mes siguiente
-        fecha_pago = f + relativedelta(months=1)
+    if isinstance(fecha_compra, str):
+        fecha_compra = datetime.strptime(fecha_compra, "%Y-%m-%d").date()
+    
+    # Fecha de cierre de ESTE mes de compra
+    fecha_cierre_mes = date(fecha_compra.year, fecha_compra.month, dia_cierre)
+    
+    if fecha_compra <= fecha_cierre_mes:
+        # Entra en el resumen del mes siguiente
+        mes_vto = fecha_compra + relativedelta(months=1)
     else:
-        # Entra en el vencimiento de 2 meses adelante
-        fecha_pago = f + relativedelta(months=2)
-    return fecha_pago.month, fecha_pago.year
+        # Entra en el resumen de 2 meses adelante
+        mes_vto = fecha_compra + relativedelta(months=2)
+        
+    # Armamos la fecha final de vencimiento
+    try:
+        return date(mes_vto.year, mes_vto.month, dia_vencimiento)
+    except ValueError:
+        # Por si dia_vencimiento es 31 y el mes tiene 30
+        return date(mes_vto.year, mes_vto.month, 28)
 
 # --- BASE DE DATOS ---
 def get_data_maestros():
@@ -47,31 +69,45 @@ def get_data_maestros():
     try:
         resp = supabase.table("configuracion").select("valor").eq("clave", "sueldo_mensual").execute()
         sueldo = float(resp.data[0]['valor']) if resp.data else 0.0
-    except: sueldo = 0.0
+    except:
+        sueldo = 0.0
     return cuentas, categorias, sueldo
 
 def get_movimientos_periodo(desde, hasta):
     try:
         resp = supabase.table("movimientos").select(
-            "*, categorias(nombre, icono), cuentas:cuentas!cuenta_id(nombre, tipo)"
+            "*, categorias(nombre, icono), cuentas:cuentas!cuenta_id(nombre, tipo, dia_cierre, dia_vencimiento)"
         ).gte("fecha", desde).lte("fecha", hasta).order("fecha", desc=True).execute()
+        
         data = resp.data
         if not data: return pd.DataFrame()
+        
         rows = []
         for d in data:
             row = d.copy()
-            if d.get('categorias'): row['categoria'] = f"{d['categorias']['icono']} {d['categorias']['nombre']}"
-            else: row['categoria'] = "General"
-            if d.get('cuentas'): 
+            if d.get('categorias'):
+                row['categoria'] = f"{d['categorias']['icono']} {d['categorias']['nombre']}"
+            else:
+                row['categoria'] = "General"
+            
+            if d.get('cuentas'):
                 row['cuenta'] = d['cuentas']['nombre']
                 row['cuenta_tipo'] = d['cuentas']['tipo']
+                # Guardamos datos de cierre para calculos
+                row['dia_cierre'] = d['cuentas'].get('dia_cierre', 23)
+                row['dia_vencimiento'] = d['cuentas'].get('dia_vencimiento', 5)
+            
             del row['categorias'], row['cuentas']
             rows.append(row)
         return pd.DataFrame(rows)
-    except: return pd.DataFrame()
+    except:
+        return pd.DataFrame()
 
 def guardar_movimiento(fecha, monto, desc, cuenta_id, cat_id, tipo, destino_id=None):
-    payload = {"fecha": str(fecha), "monto": monto, "descripcion": desc, "cuenta_id": cuenta_id, "categoria_id": cat_id, "tipo": tipo}
+    payload = {
+        "fecha": str(fecha), "monto": monto, "descripcion": desc,
+        "cuenta_id": cuenta_id, "categoria_id": cat_id, "tipo": tipo
+    }
     if destino_id: payload["cuenta_destino_id"] = destino_id
     supabase.table("movimientos").insert(payload).execute()
 
@@ -81,236 +117,374 @@ def actualizar_movimiento(id_mov, campo, valor):
 def borrar_movimiento(id_mov):
     supabase.table("movimientos").delete().eq("id", id_mov).execute()
 
-# --- LOGICA TARJETAS ---
-def get_consumos_tarjeta(cuenta_id, mes_pago, anio_pago, dia_cierre):
-    # Calculamos el rango de fechas de compra que entran en este resumen
-    # Ejemplo: Para pagar en Marzo (Vence 05/03), el cierre fue aprox 23/02.
-    # Entran compras desde 24/01 hasta 23/02.
-    
-    fecha_vto_teorica = date(anio_pago, mes_pago, 5) # Asumimos día 5 ref
-    cierre_actual = fecha_vto_teorica - relativedelta(months=1) # Feb
-    cierre_actual = cierre_actual.replace(day=dia_cierre) # 23/02
-    
-    cierre_anterior = cierre_actual - relativedelta(months=1) # 23/01
-    inicio_periodo = cierre_anterior + timedelta(days=1) # 24/01
-    
-    resp = supabase.table("movimientos").select("*")\
-        .eq("cuenta_id", cuenta_id)\
-        .eq("tipo", "COMPRA_TARJETA")\
-        .gte("fecha", str(inicio_periodo))\
-        .lte("fecha", str(cierre_actual))\
-        .execute()
-    
-    return pd.DataFrame(resp.data)
-
-# --- CARGA ---
+# --- CARGA INICIAL ---
 df_cuentas, df_cats, sueldo = get_data_maestros()
 
 # --- SIDEBAR ---
 with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/2382/2382461.png", width=50)
     st.title("Finanzas Pro")
-    menu = st.radio("Ir a", ["📊 Dashboard", "💳 Tarjetas (Nuevo)", "📅 Planificador", "➕ Cargar", "📝 Movimientos", "⚙️ Ajustes"])
+    
+    menu = st.radio("Menú Principal", 
+        ["📊 Dashboard", "💳 Tarjetas", "📅 Planificador", "➕ Cargar Manual", "📝 Historial", "⚙️ Configuración"]
+    )
+    
     st.divider()
-    fecha_inicio = st.date_input("Desde", date.today().replace(day=1))
-    fecha_fin = st.date_input("Hasta", date.today())
+    st.caption("📅 Filtro Global")
+    today = date.today()
+    fecha_inicio = st.date_input("Desde", today.replace(day=1))
+    fecha_fin = st.date_input("Hasta", today)
 
-# --- DASHBOARD ---
+# ==========================================
+# 1. DASHBOARD
+# ==========================================
 if menu == "📊 Dashboard":
+    st.title("Tablero de Control")
+    
+    # Traemos movimientos
     df = get_movimientos_periodo(fecha_inicio, fecha_fin)
     
-    # 1. Calcular Deuda de Tarjeta que VENCE este mes seleccionado
-    # (No lo que gastaste este mes, sino lo que tenés que pagar)
+    # 1. Calcular VENCIMIENTOS DE TARJETA para este mes
+    # (No lo que gastaste, sino lo que vence en el mes seleccionado en el filtro 'Hasta')
     total_a_pagar_tarjetas = 0
-    df_tarjetas = df_cuentas[df_cuentas['tipo'] == 'CREDITO']
+    detalles_tarjeta = []
     
-    # Fecha de referencia para el vencimiento (usamos el mes del filtro "Hasta")
+    # Usamos el mes/año de la fecha "Hasta" como referencia de "Qué mes estoy pagando"
     mes_ref = fecha_fin.month
     anio_ref = fecha_fin.year
     
-    detalles_tarjeta = []
+    # Necesitamos traer un rango más amplio de movimientos históricos para calcular vencimientos
+    # (porque una compra de hace 45 días puede vencer hoy)
+    df_historico_tj = get_movimientos_periodo(fecha_fin - relativedelta(months=3), fecha_fin)
     
-    for _, tj in df_tarjetas.iterrows():
-        # Buscamos consumos que caen en este vencimiento
-        df_c = get_consumos_tarjeta(tj['id'], mes_ref, anio_ref, tj['dia_cierre'])
-        if not df_c.empty:
-            monto_tj = df_c['monto'].sum()
-            total_a_pagar_tarjetas += monto_tj
-            detalles_tarjeta.append(f"{tj['nombre']}: {fmt_ars(monto_tj)}")
-
-    # 2. Otros cálculos
-    gastos_cash = df[df['tipo'] == 'GASTO']['monto'].sum() if not df.empty else 0
-    # Sumamos pagos de tarjeta YA realizados para no duplicar en el disponible
-    pagos_tj_realizados = df[df['tipo'] == 'PAGO_TARJETA']['monto'].sum() if not df.empty else 0
+    if not df_historico_tj.empty:
+        # Filtramos solo compras con tarjeta
+        df_tj_hist = df_historico_tj[df_historico_tj['tipo'] == 'COMPRA_TARJETA'].copy()
+        
+        if not df_tj_hist.empty:
+            # Calculamos fecha de vencimiento real para cada compra
+            df_tj_hist['fecha_vto_real'] = df_tj_hist.apply(
+                lambda x: calcular_fecha_vencimiento(x['fecha'], x.get('dia_cierre', 23), x.get('dia_vencimiento', 5)), axis=1
+            )
+            
+            # Filtramos las que vencen en el mes seleccionado
+            df_vence_ahora = df_tj_hist[
+                (pd.to_datetime(df_tj_hist['fecha_vto_real']).dt.month == mes_ref) & 
+                (pd.to_datetime(df_tj_hist['fecha_vto_real']).dt.year == anio_ref)
+            ]
+            
+            if not df_vence_ahora.empty:
+                total_a_pagar_tarjetas = df_vence_ahora['monto'].sum()
+                # Agrupamos por tarjeta para mostrar detalle
+                por_tarjeta = df_vence_ahora.groupby('cuenta')['monto'].sum()
+                for nombre, monto in por_tarjeta.items():
+                    detalles_tarjeta.append(f"{nombre}: {fmt_ars(monto)}")
+    
+    # 2. Otros Cálculos
+    gastos_efectivo = df[df['tipo'] == 'GASTO']['monto'].sum() if not df.empty else 0
+    # Pagos de tarjeta ya realizados (Salida de plata real)
+    pagos_tj_hechos = df[df['tipo'] == 'PAGO_TARJETA']['monto'].sum() if not df.empty else 0
     
     ingresos = df[df['tipo'] == 'INGRESO']['monto'].sum() if not df.empty else 0
     total_ingresos = sueldo + ingresos
     
-    # Disponible REAL = Ingresos - (Gastos Efectivo + Pagos Tarjeta Hechos + Deuda Tarjeta Pendiente)
-    disponible_real = total_ingresos - (gastos_cash + pagos_tj_realizados)
-    # A ese disponible, le restamos lo que VENCE de tarjeta (si aun no se pagó)
-    # Simplificación: Asumimos que si está en 'PAGO_TARJETA' ya se descontó, si no, se resta del proyectado.
-    saldo_final_mes = disponible_real - (total_a_pagar_tarjetas - pagos_tj_realizados)
-
-    st.header(f"Cashflow {fecha_fin.strftime('%B %Y')}")
+    # Disponible = Ingresos - (Gastos Cash + Pagos ya hechos + Deuda que vence y no pagué)
+    # Simplificación: Si ya pagué tarjeta (pagos_tj_hechos), se resta del total a pagar
+    deuda_pendiente = max(0, total_a_pagar_tarjetas - pagos_tj_hechos)
     
+    disponible_final = total_ingresos - gastos_efectivo - pagos_tj_hechos - deuda_pendiente
+
+    # --- VISUALIZACION ---
     col1, col2, col3 = st.columns(3)
+    
     with col1:
         with st.container(border=True):
-            st.metric("💰 Disponible Real", fmt_ars(saldo_final_mes), help="Considerando que pagues todo el resumen de la tarjeta")
-            st.caption(f"Ingresos: {fmt_ars(total_ingresos)}")
+            st.metric("💰 Disponible Real", fmt_ars(disponible_final), help="Después de pagar todo (incluso la tarjeta que vence)")
+            st.caption(f"Ingresos Totales: {fmt_ars(total_ingresos)}")
+            
     with col2:
         with st.container(border=True):
-            st.metric("💸 Gastos Cash", fmt_ars(gastos_cash), delta="Efectivo/Debito", delta_color="inverse")
+            st.metric("💳 Vencimientos Tarjeta", fmt_ars(total_a_pagar_tarjetas), help=f"Total a pagar en {mes_ref}/{anio_ref}")
+            if detalles_tarjeta:
+                for d in detalles_tarjeta:
+                    st.caption(f"• {d}")
+            else:
+                st.caption("Nada vence este mes")
+                
     with col3:
         with st.container(border=True):
-            st.metric("💳 Resumen Tarjeta", fmt_ars(total_a_pagar_tarjetas), help="Lo que vence este mes (Cierre mes anterior)")
-            if detalles_tarjeta:
-                for d in detalles_tarjeta: st.caption(d)
-            else:
-                st.caption("Sin vencimientos")
+            st.metric("💸 Gastos Efectivo/Deb", fmt_ars(gastos_efectivo))
+            st.caption(f"Pagos Tarjeta ya hechos: {fmt_ars(pagos_tj_hechos)}")
 
-# --- MODULO TARJETAS ---
-elif menu == "💳 Tarjetas (Nuevo)":
-    st.title("Gestión de Tarjetas")
+    st.divider()
     
-    # Selector de Tarjeta
-    df_credito = df_cuentas[df_cuentas['tipo'] == 'CREDITO']
-    if df_credito.empty:
-        st.warning("Configurá una cuenta tipo 'CREDITO' en Ajustes primero.")
+    # Gráfico de barras simple
+    st.subheader("Evolución Diaria")
+    if not df.empty:
+        # Solo mostramos GASTO (cash) y PAGO_TARJETA (salida real de plata)
+        df_chart = df[df['tipo'].isin(['GASTO', 'PAGO_TARJETA'])]
+        if not df_chart.empty:
+            df_grp = df_chart.groupby('fecha')['monto'].sum().reset_index()
+            fig = px.bar(df_grp, x='fecha', y='monto', color_discrete_sequence=['#FF4B4B'])
+            fig.update_layout(xaxis_title=None, yaxis_title=None, height=300)
+            st.plotly_chart(fig, use_container_width=True)
     else:
-        tarjeta_sel = st.selectbox("Seleccionar Tarjeta", df_credito['nombre'].tolist())
-        datos_tj = df_credito[df_credito['nombre'] == tarjeta_sel].iloc[0]
-        id_tj = datos_tj['id']
-        dia_cierre = datos_tj['dia_cierre'] if datos_tj['dia_cierre'] else 25
-        
-        # Tabs
-        tab_resumen, tab_importar = st.tabs(["📅 Próximos Vencimientos", "📥 Importar Resumen (CSV/Excel)"])
-        
-        with tab_resumen:
-            # Calcular periodo abierto (lo que estás gastando AHORA para pagar el mes que viene)
-            hoy = date.today()
-            # Si hoy es 16/02 y cierra el 23/02 -> Pago en Marzo
-            if hoy.day <= dia_cierre:
-                mes_pago = hoy.month + 1
-                anio_pago = hoy.year if hoy.month < 12 else hoy.year + 1
-                estado = "Ciclo ABIERTO (Cierra el {:02d}/{:02d})".format(dia_cierre, hoy.month)
-            else:
-                mes_pago = hoy.month + 2 # Ya cerró, entra para el otro
-                anio_pago = hoy.year
-                estado = "Ciclo NUEVO (Cierra el {:02d} del mes que viene)".format(dia_cierre)
-                
-            df_pend = get_consumos_tarjeta(id_tj, mes_pago, anio_pago, dia_cierre)
-            total_pend = df_pend['monto'].sum() if not df_pend.empty else 0
-            
-            st.subheader(f"A pagar en el resumen de: {mes_pago}/{anio_pago}")
-            st.caption(estado)
-            st.metric("Acumulado al momento", fmt_ars(total_pend))
-            
-            if not df_pend.empty:
-                st.dataframe(df_pend[['fecha', 'descripcion', 'monto']], use_container_width=True)
-        
-        with tab_importar:
-            st.subheader("Cargar Resumen del Banco")
-            st.info("Subí el Excel/CSV. El sistema detecta gastos y los carga en la fecha correcta.")
-            uploaded = st.file_uploader("Archivo", type=['csv', 'xlsx', 'xls'])
-            
-            if uploaded:
-                try:
-                    if uploaded.name.endswith('.csv'):
-                        df_upload = pd.read_csv(uploaded)
-                    else:
-                        df_upload = pd.read_excel(uploaded)
-                    
-                    st.write("Vista previa (Primeras filas):")
-                    st.dataframe(df_upload.head(3))
-                    
-                    with st.form("map_columns"):
-                        st.write("Ayudame a entender las columnas de tu banco:")
-                        c1, c2, c3 = st.columns(3)
-                        col_fecha = c1.selectbox("Columna Fecha", df_upload.columns)
-                        col_desc = c2.selectbox("Columna Descripción", df_upload.columns)
-                        col_monto = c3.selectbox("Columna Importe", df_upload.columns)
-                        
-                        cat_default = st.selectbox("Categoría por defecto", df_cats['nombre'].tolist())
-                        
-                        if st.form_submit_button("Procesar Gastos"):
-                            count = 0
-                            id_cat = df_cats[df_cats['nombre'] == cat_default]['id'].values[0]
-                            
-                            for _, row in df_upload.iterrows():
-                                try:
-                                    # Parsear Fecha
-                                    f_raw = row[col_fecha]
-                                    # Intentos de formato
-                                    if isinstance(f_raw, str):
-                                        f_obj = pd.to_datetime(f_raw, dayfirst=True).date()
-                                    else:
-                                        f_obj = f_raw.date() # Si es timestamp
-                                    
-                                    # Parsear Monto
-                                    m_raw = row[col_monto]
-                                    if isinstance(m_raw, str):
-                                        m_raw = m_raw.replace('$','').replace('.','').replace(',','.')
-                                    monto_final = abs(float(m_raw))
-                                    
-                                    desc_final = str(row[col_desc])
-                                    
-                                    if monto_final > 0:
-                                        guardar_movimiento(f_obj, monto_final, desc_final, id_tj, id_cat, "COMPRA_TARJETA")
-                                        count += 1
-                                except Exception as e:
-                                    st.error(f"Error en fila: {e}")
-                            
-                            st.success(f"Se importaron {count} consumos a la tarjeta {tarjeta_sel}.")
-                            time.sleep(2)
-                            st.rerun()
+        st.info("Sin datos para graficar.")
 
-                except Exception as e:
-                    st.error(f"Error leyendo archivo: {e}")
-
-# --- PLANIFICADOR ---
-elif menu == "📅 Planificador":
-    st.title("Planificar Mes Futuro")
-    # ... (Misma lógica V4.2 pero podrías mostrar la deuda de tarjeta calculada) ...
-    # Para no hacer el código infinito, dejé la lógica base, pero ahora podés ver
-    # en el Dashboard cuánto te cae de tarjeta antes de planificar.
+# ==========================================
+# 2. TARJETAS (CONFIG Y CARGA)
+# ==========================================
+elif menu == "💳 Tarjetas":
+    st.title("Gestión de Crédito")
     
-    with st.container(border=True):
-        c_m, c_a = st.columns(2)
-        mes_sel = c_m.selectbox("Mes", range(1, 13), index=date.today().month % 12)
-        anio_sel = c_a.number_input("Año", value=date.today().year)
-        
-        st.info("Carga tus gastos fijos aquí. La tarjeta se calcula sola en el Dashboard.")
-        # (Acá iría la tabla editable de siempre)
-        # Te la resumo para no repetir código gigante, usá la del V4.2
-
-# --- AJUSTES (UPDATED) ---
-elif menu == "⚙️ Ajustes":
-    st.header("Configuración de Tarjetas")
+    tab_conf, tab_imp = st.tabs(["⚙️ Configurar Fechas", "📥 Importar Resumen"])
     
-    with st.container(border=True):
-        st.subheader("Fechas de Cierre")
+    with tab_conf:
+        st.subheader("Configurar Cierres y Vencimientos")
+        st.info("Esto es vital para que el Dashboard calcule bien cuándo pagás.")
+        
         df_credito = df_cuentas[df_cuentas['tipo'] == 'CREDITO']
-        
         if not df_credito.empty:
             for i, row in df_credito.iterrows():
-                c1, c2 = st.columns([3, 1])
-                c1.write(f"💳 **{row['nombre']}**")
-                nuevo_cierre = c2.number_input(f"Día Cierre {row['nombre']}", 1, 31, int(row.get('dia_cierre') or 25), key=f"c_{row['id']}")
-                
-                if st.button(f"Guardar {row['nombre']}", key=f"b_{row['id']}"):
-                    supabase.table("cuentas").update({"dia_cierre": nuevo_cierre}).eq("id", row['id']).execute()
-                    st.success("Guardado")
-                    time.sleep(1)
-                    st.rerun()
+                with st.container(border=True):
+                    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+                    c1.markdown(f"### 💳 {row['nombre']}")
+                    
+                    # Inputs
+                    d_cierre = c2.number_input(f"Día Cierre", 1, 31, int(row.get('dia_cierre') or 23), key=f"c_{row['id']}")
+                    d_vto = c3.number_input(f"Día Vencimiento", 1, 31, int(row.get('dia_vencimiento') or 5), key=f"v_{row['id']}")
+                    
+                    if c4.button("Guardar", key=f"btn_{row['id']}"):
+                        supabase.table("cuentas").update({
+                            "dia_cierre": d_cierre,
+                            "dia_vencimiento": d_vto
+                        }).eq("id", row['id']).execute()
+                        st.success(f"¡{row['nombre']} actualizada!")
+                        time.sleep(1)
+                        st.rerun()
         else:
-            st.info("No tenés tarjetas creadas. Creá una cuenta tipo 'CREDITO' en Supabase.")
+            st.warning("No tenés cuentas tipo 'CREDITO'. Creala en Supabase o editá una existente.")
 
-# --- CARGAR / MOVIMIENTOS ---
-elif menu == "➕ Cargar":
-    # Copiar lógica V4.2 (es igual)
-    st.write("Formulario de carga manual (igual V4.2)") 
+    with tab_imp:
+        st.subheader("Importar Excel del Banco")
+        st.caption("Sube el CSV o Excel. El sistema detectará las fechas y calculará los vencimientos automáticos.")
+        
+        uploaded = st.file_uploader("Archivo", type=['csv', 'xlsx'])
+        if uploaded:
+            # Seleccionar Tarjeta Destino
+            tarjeta_dest = st.selectbox("¿A qué tarjeta corresponden estos gastos?", df_credito['nombre'].tolist())
+            
+            try:
+                if uploaded.name.endswith('.csv'):
+                    df_up = pd.read_csv(uploaded)
+                else:
+                    df_up = pd.read_excel(uploaded)
+                
+                st.write("Vista previa:", df_up.head(3))
+                
+                with st.form("form_import_tj"):
+                    c1, c2, c3 = st.columns(3)
+                    col_f = c1.selectbox("Columna Fecha", df_up.columns)
+                    col_d = c2.selectbox("Columna Descripción", df_up.columns)
+                    col_m = c3.selectbox("Columna Monto/Importe", df_up.columns)
+                    cat_def = st.selectbox("Categoría por defecto", df_cats['nombre'].tolist())
+                    
+                    if st.form_submit_button("Procesar e Importar"):
+                        id_tj = df_credito[df_credito['nombre'] == tarjeta_dest]['id'].values[0]
+                        id_cat = df_cats[df_cats['nombre'] == cat_def]['id'].values[0]
+                        count = 0
+                        
+                        for _, row in df_up.iterrows():
+                            try:
+                                # Parsear Fecha
+                                f_raw = row[col_f]
+                                if isinstance(f_raw, str):
+                                    f_obj = pd.to_datetime(f_raw, dayfirst=True).date() # Intenta formato DD/MM/YYYY
+                                else:
+                                    f_obj = f_raw.date()
+                                
+                                # Parsear Monto
+                                m_raw = row[col_m]
+                                if isinstance(m_raw, str):
+                                    m_raw = m_raw.replace('$','').replace('.','').replace(',','.')
+                                monto = abs(float(m_raw))
+                                
+                                desc = str(row[col_d])
+                                
+                                if monto > 0:
+                                    guardar_movimiento(f_obj, monto, desc, id_tj, id_cat, "COMPRA_TARJETA")
+                                    count += 1
+                            except Exception as e:
+                                pass # Ignorar filas erróneas
+                        
+                        st.success(f"✅ Se importaron {count} compras correctamente.")
+                        time.sleep(2)
+            except Exception as e:
+                st.error(f"Error leyendo el archivo: {e}")
 
-elif menu == "📝 Movimientos":
-    # Copiar lógica V4.2 (es igual)
-    st.write("Tabla editable (igual V4.2)")
+# ==========================================
+# 3. PLANIFICADOR
+# ==========================================
+elif menu == "📅 Planificador":
+    st.title("Planificar Mes Futuro")
+    
+    with st.container(border=True):
+        c_mes, c_anio = st.columns(2)
+        next_m = date.today() + relativedelta(months=1)
+        mes_sel = c_mes.selectbox("Mes", range(1, 13), index=next_m.month-1)
+        anio_sel = c_anio.number_input("Año", value=next_m.year, step=1, format="%d")
+        
+        fecha_plan = date(anio_sel, mes_sel, 1)
+        st.markdown(f"### Planificando: {fecha_plan.strftime('%B %Y')}")
+        
+        st.divider()
+        st.subheader("1. Ingresos Estimados")
+        ingreso_neto = st.number_input("Sueldo Neto a Cobrar", value=int(sueldo), step=1000, format="%i")
+        cta_ing = st.selectbox("Cuenta Destino", df_cuentas['nombre'].tolist())
+        
+        st.divider()
+        st.subheader("2. Gastos Fijos")
+        
+        if 'df_plan' not in st.session_state:
+            st.session_state.df_plan = pd.DataFrame([
+                {"Descripción": "Alquiler", "Monto": 0.0, "Categoría": "Varios", "Medio Pago": "Efectivo"},
+                {"Descripción": "Internet", "Monto": 0.0, "Categoría": "Servicios", "Medio Pago": "Mercado Pago"},
+            ])
+            
+        edited_plan = st.data_editor(
+            st.session_state.df_plan,
+            num_rows="dynamic",
+            column_config={
+                "Categoría": st.column_config.SelectboxColumn(options=df_cats['nombre'].tolist()), # .tolist() FIX
+                "Medio Pago": st.column_config.SelectboxColumn(options=df_cuentas['nombre'].tolist()), # .tolist() FIX
+                "Monto": st.column_config.NumberColumn(format="$%.2f")
+            },
+            use_container_width=True
+        )
+        
+        total_fijos = edited_plan['Monto'].sum()
+        saldo = ingreso_neto - total_fijos
+        
+        st.metric("💰 Saldo Proyectado (Sin contar tarjeta)", fmt_ars(saldo), delta=f"Fijos: {fmt_ars(total_fijos)}")
+        
+        if st.button("🚀 Guardar Plan", type="primary", use_container_width=True):
+            # Guardar Ingreso
+            id_cta = df_cuentas[df_cuentas['nombre'] == cta_ing]['id'].values[0]
+            try: id_cat = df_cats[df_cats['nombre'].str.contains("Sueldo")]['id'].values[0]
+            except: id_cat = df_cats.iloc[0]['id']
+            
+            guardar_movimiento(fecha_plan, ingreso_neto, "Sueldo Planificado", id_cta, id_cat, "INGRESO")
+            
+            # Guardar Gastos
+            count = 0
+            for _, r in edited_plan.iterrows():
+                if r['Monto'] > 0:
+                    c_id = df_cuentas[df_cuentas['nombre'] == r['Medio Pago']]['id'].values[0]
+                    cat_id = df_cats[df_cats['nombre'] == r['Categoría']]['id'].values[0]
+                    es_cr = df_cuentas[df_cuentas['nombre'] == r['Medio Pago']]['tipo'].values[0] == 'CREDITO'
+                    tipo = "COMPRA_TARJETA" if es_cr else "GASTO"
+                    
+                    # Guardamos el día 5 del mes planificado
+                    guardar_movimiento(fecha_plan + timedelta(days=4), r['Monto'], r['Descripción'], c_id, cat_id, tipo)
+                    count += 1
+            
+            st.success(f"¡Plan guardado con éxito!")
+            time.sleep(2)
+            st.rerun()
+
+# ==========================================
+# 4. CARGA MANUAL
+# ==========================================
+elif menu == "➕ Cargar Manual":
+    st.title("Nueva Operación")
+    
+    tipo_op = st.radio("Tipo", ["Gasto / Compra", "Ingreso", "Transferencia", "Pagar Tarjeta"], horizontal=True)
+    
+    with st.container(border=True):
+        c1, c2 = st.columns(2)
+        fecha = c1.date_input("Fecha", date.today())
+        monto = c2.number_input("Monto", min_value=1.0, step=100.0, format="%.2f")
+        desc = st.text_input("Descripción", placeholder="Ej: Supermercado")
+
+        if tipo_op == "Gasto / Compra":
+            c3, c4 = st.columns(2)
+            cta = c3.selectbox("Medio de Pago", df_cuentas['nombre'].tolist())
+            cat = c4.selectbox("Categoría", df_cats['nombre'].tolist())
+            
+            if st.button("Guardar Gasto", type="primary", use_container_width=True):
+                id_c = df_cuentas[df_cuentas['nombre'] == cta]['id'].values[0]
+                id_cat = df_cats[df_cats['nombre'] == cat]['id'].values[0]
+                es_cr = df_cuentas[df_cuentas['nombre'] == cta]['tipo'].values[0] == 'CREDITO'
+                tipo_db = "COMPRA_TARJETA" if es_cr else "GASTO"
+                guardar_movimiento(fecha, monto, desc, id_c, id_cat, tipo_db)
+                st.success("Guardado!"); time.sleep(1); st.rerun()
+
+        elif tipo_op == "Ingreso":
+            cta = st.selectbox("Cuenta Destino", df_cuentas['nombre'].tolist())
+            cat = st.selectbox("Rubro", df_cats['nombre'].tolist())
+            if st.button("Guardar Ingreso", type="primary", use_container_width=True):
+                id_c = df_cuentas[df_cuentas['nombre'] == cta]['id'].values[0]
+                id_cat = df_cats[df_cats['nombre'] == cat]['id'].values[0]
+                guardar_movimiento(fecha, monto, desc, id_c, id_cat, "INGRESO")
+                st.success("Guardado!"); time.sleep(1); st.rerun()
+
+        elif tipo_op == "Transferencia":
+            orig = st.selectbox("Desde", df_cuentas['nombre'].tolist())
+            dest = st.selectbox("Hacia", df_cuentas['nombre'].tolist())
+            if st.button("Transferir", type="primary", use_container_width=True):
+                id_o = df_cuentas[df_cuentas['nombre'] == orig]['id'].values[0]
+                id_d = df_cuentas[df_cuentas['nombre'] == dest]['id'].values[0]
+                id_cat = df_cats.iloc[0]['id']
+                guardar_movimiento(fecha, monto, f"Transferencia a {dest}", id_o, id_cat, "TRANSFERENCIA", id_d)
+                st.success("Transferido!"); time.sleep(1); st.rerun()
+        
+        elif tipo_op == "Pagar Tarjeta":
+            st.info("Registra el pago del resumen de la tarjeta (salida de plata de tu banco).")
+            orig = st.selectbox("Pagar desde (Banco/Efvo)", df_cuentas[df_cuentas['tipo'] != 'CREDITO']['nombre'].tolist())
+            dest = st.selectbox("Qué Tarjeta Pagaste", df_cuentas[df_cuentas['tipo'] == 'CREDITO']['nombre'].tolist())
+            
+            if st.button("Registrar Pago Tarjeta", type="primary", use_container_width=True):
+                id_o = df_cuentas[df_cuentas['nombre'] == orig]['id'].values[0]
+                id_d = df_cuentas[df_cuentas['nombre'] == dest]['id'].values[0]
+                id_cat = df_cats.iloc[0]['id'] # Categoria varios o default
+                guardar_movimiento(fecha, monto, f"Pago Resumen {dest}", id_o, id_cat, "PAGO_TARJETA", id_d)
+                st.success("Pago Registrado!"); time.sleep(1); st.rerun()
+
+# ==========================================
+# 5. HISTORIAL
+# ==========================================
+elif menu == "📝 Historial":
+    st.title("Base de Datos")
+    df = get_movimientos_periodo(fecha_inicio, fecha_fin)
+    
+    if not df.empty:
+        df_edit = df[['id', 'fecha', 'descripcion', 'monto', 'cuenta', 'categoria', 'tipo']].copy()
+        edited_df = st.data_editor(
+            df_edit,
+            column_config={
+                "id": None,
+                "monto": st.column_config.NumberColumn(format="$%.2f"),
+                "fecha": st.column_config.DateColumn(),
+            },
+            hide_index=True, use_container_width=True, num_rows="dynamic", key="movs_edit"
+        )
+        if st.button("💾 Guardar Cambios"):
+            cambios = st.session_state['movs_edit']
+            for i, u in cambios['edited_rows'].items():
+                rid = df_edit.iloc[i]['id']
+                for k, v in u.items(): actualizar_movimiento(rid, k, v)
+            for i in cambios['deleted_rows']:
+                rid = df_edit.iloc[i]['id']
+                borrar_movimiento(rid)
+            st.toast("Base actualizada"); time.sleep(1); st.rerun()
+
+# ==========================================
+# 6. CONFIGURACION
+# ==========================================
+elif menu == "⚙️ Configuración":
+    st.header("Ajustes Generales")
+    with st.container(border=True):
+        nuevo = st.number_input("Sueldo Base Mensual", value=int(sueldo), step=1000, format="%i")
+        if st.button("Actualizar Sueldo"):
+            supabase.table("configuracion").upsert({"clave": "sueldo_mensual", "valor": str(nuevo)}).execute()
+            st.success("Guardado!"); time.sleep(1); st.rerun()
