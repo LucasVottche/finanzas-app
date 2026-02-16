@@ -36,34 +36,42 @@ def get_config(clave):
         return 0.0
 
 def get_movimientos(desde, hasta):
-    # Query filtrada por fecha (Backend filtering)
-    resp = supabase.table("movimientos").select(
-        "*, categorias(nombre, icono), cuentas(nombre, tipo)"
-    ).gte("fecha", desde).lte("fecha", hasta).execute()
-    
-    data = resp.data
-    if not data:
+    # CORRECCIÓN: Usamos !cuenta_id para decirle explícitamente que use la cuenta de origen
+    # para resolver el nombre, evitando la ambigüedad con cuenta_destino.
+    try:
+        resp = supabase.table("movimientos").select(
+            "*, categorias(nombre, icono), cuentas:cuentas!cuenta_id(nombre, tipo)"
+        ).gte("fecha", desde).lte("fecha", hasta).execute()
+        
+        data = resp.data
+        if not data:
+            return pd.DataFrame()
+        
+        # Aplanar JSON
+        rows = []
+        for d in data:
+            row = d.copy()
+            # Safely get category
+            if d.get('categorias'):
+                row['categoria'] = f"{d['categorias']['icono']} {d['categorias']['nombre']}"
+            else:
+                row['categoria'] = "General"
+            
+            # Safely get account (usando el alias 'cuentas' que definimos arriba)
+            if d.get('cuentas'):
+                row['cuenta'] = d['cuentas']['nombre']
+                row['cuenta_tipo'] = d['cuentas']['tipo']
+            
+            # Limpieza de objetos anidados
+            row.pop('categorias', None)
+            row.pop('cuentas', None)
+            rows.append(row)
+            
+        return pd.DataFrame(rows)
+        
+    except Exception as e:
+        st.error(f"Error trayendo datos: {e}")
         return pd.DataFrame()
-    
-    # Aplanar JSON (Join manual simple)
-    rows = []
-    for d in data:
-        row = d.copy()
-        if d.get('categorias'):
-            row['categoria'] = f"{d['categorias']['icono']} {d['categorias']['nombre']}"
-        else:
-            row['categoria'] = "General"
-        
-        if d.get('cuentas'):
-            row['cuenta'] = d['cuentas']['nombre']
-            row['cuenta_tipo'] = d['cuentas']['tipo']
-        
-        # Limpieza
-        del row['categorias']
-        del row['cuentas']
-        rows.append(row)
-        
-    return pd.DataFrame(rows)
 
 def guardar_movimiento(fecha, monto, desc, cuenta_id, cat_id, tipo, destino_id=None):
     payload = {
