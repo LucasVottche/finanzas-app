@@ -28,13 +28,9 @@ supabase = init_connection()
 
 # --- FUNCIONES DE FORMATO ARGENTINO 🇦🇷 ---
 def fmt_ars(valor):
-    """Convierte 1500.50 en $1.500,50"""
     if valor is None: valor = 0
-    # Formato estándar primero (1,500.50)
     s = f"{valor:,.2f}"
-    # Invertimos caracteres: , -> X, . -> ,, X -> .
     s = s.replace(',', 'X').replace('.', ',').replace('X', '.')
-    # Si termina en ,00 lo sacamos para limpiar
     if s.endswith(",00"):
         s = s[:-3]
     return f"${s}"
@@ -126,7 +122,6 @@ if menu == "📊 Dashboard":
     col1, col2 = st.columns(2)
     with col1:
         with st.container(border=True):
-            # Usamos fmt_ars para mostrar lindo
             st.metric("✅ Disponible", fmt_ars(disponible))
             st.caption(f"Ingresos Totales: {fmt_ars(total_ingresos)}")
     with col2:
@@ -159,14 +154,13 @@ elif menu == "📅 Planificador":
         c_m, c_a = st.columns(2)
         next_month = date.today() + relativedelta(months=1)
         mes_sel = c_m.selectbox("Mes", range(1, 13), index=next_month.month-1)
-        anio_sel = c_a.number_input("Año", value=next_month.year, step=1, format="%d") # Format %d saca la coma al año
+        anio_sel = c_a.number_input("Año", value=next_month.year, step=1, format="%d")
         fecha_plan = date(anio_sel, mes_sel, 1)
         
         st.divider()
         st.subheader("1. Tu Sueldo Neto")
-        # step=1000 asegura que salte de a miles, format="%i" muestra entero sin decimales
         ingreso_neto = st.number_input("Monto a cobrar", value=int(sueldo), step=1000, format="%i")
-        cta_ingreso = st.selectbox("Cuenta Destino", df_cuentas['nombre'])
+        cta_ingreso = st.selectbox("Cuenta Destino", df_cuentas['nombre'].tolist())
         
         st.divider()
         st.subheader("2. Gastos Fijos")
@@ -176,13 +170,14 @@ elif menu == "📅 Planificador":
                 {"Descripción": "Internet", "Monto": 0, "Categoría": "Servicios", "Medio Pago": "Mercado Pago"},
             ])
 
+        # CORRECCIÓN DE ERROR AQUI ABAJO (.tolist())
         edited_plan = st.data_editor(
             st.session_state.df_plan, 
             num_rows="dynamic", 
             column_config={
-                "Categoría": st.column_config.SelectboxColumn(options=df_cats['nombre']),
-                "Medio Pago": st.column_config.SelectboxColumn(options=df_cuentas['nombre']),
-                "Monto": st.column_config.NumberColumn(format="$%.2f") # Acá dejamos decimal por si acaso
+                "Categoría": st.column_config.SelectboxColumn(options=df_cats['nombre'].tolist()),
+                "Medio Pago": st.column_config.SelectboxColumn(options=df_cuentas['nombre'].tolist()),
+                "Monto": st.column_config.NumberColumn(format="$%.2f") 
             }, 
             use_container_width=True
         )
@@ -193,13 +188,11 @@ elif menu == "📅 Planificador":
         st.metric("💰 Saldo Proyectado", fmt_ars(saldo_est), delta=f"Fijos: {fmt_ars(total_fijos)}")
         
         if st.button("🚀 Guardar Plan", type="primary", use_container_width=True):
-            # Guardar Ingreso
             id_cta = df_cuentas[df_cuentas['nombre'] == cta_ingreso]['id'].values[0]
             try: id_cat = df_cats[df_cats['nombre'].str.contains("Sueldo")]['id'].values[0]
             except: id_cat = df_cats.iloc[0]['id']
             guardar_movimiento(fecha_plan, ingreso_neto, "Sueldo Planificado", id_cta, id_cat, "INGRESO")
             
-            # Guardar Gastos
             c = 0
             for _, r in edited_plan.iterrows():
                 if r['Monto'] > 0:
@@ -220,14 +213,13 @@ elif menu == "➕ Cargar":
     with st.container(border=True):
         c1, c2 = st.columns(2)
         fecha = c1.date_input("Fecha", date.today())
-        # Input limpio: format="%i" para enteros
         monto = c2.number_input("Monto", min_value=1, step=100, format="%i")
         desc = st.text_input("Descripción")
         
         if tipo == "Gasto":
             c3, c4 = st.columns(2)
-            cta = c3.selectbox("Pago con", df_cuentas['nombre'])
-            cat = c4.selectbox("Rubro", df_cats['nombre'])
+            cta = c3.selectbox("Pago con", df_cuentas['nombre'].tolist())
+            cat = c4.selectbox("Rubro", df_cats['nombre'].tolist())
             if st.button("Guardar", type="primary", use_container_width=True):
                 id_c = df_cuentas[df_cuentas['nombre'] == cta]['id'].values[0]
                 id_cat = df_cats[df_cats['nombre'] == cat]['id'].values[0]
@@ -237,8 +229,8 @@ elif menu == "➕ Cargar":
                 st.success("Guardado!"); time.sleep(1); st.rerun()
         
         elif tipo == "Ingreso":
-            cta = st.selectbox("Destino", df_cuentas['nombre'])
-            cat = st.selectbox("Rubro", df_cats['nombre'])
+            cta = st.selectbox("Destino", df_cuentas['nombre'].tolist())
+            cat = st.selectbox("Rubro", df_cats['nombre'].tolist())
             if st.button("Guardar", type="primary", use_container_width=True):
                 id_c = df_cuentas[df_cuentas['nombre'] == cta]['id'].values[0]
                 id_cat = df_cats[df_cats['nombre'] == cat]['id'].values[0]
@@ -246,8 +238,8 @@ elif menu == "➕ Cargar":
                 st.success("Guardado!"); time.sleep(1); st.rerun()
                 
         elif tipo == "Transferencia":
-            orig = st.selectbox("Desde", df_cuentas['nombre'])
-            dest = st.selectbox("Hacia", df_cuentas['nombre'])
+            orig = st.selectbox("Desde", df_cuentas['nombre'].tolist())
+            dest = st.selectbox("Hacia", df_cuentas['nombre'].tolist())
             if st.button("Transferir", type="primary", use_container_width=True):
                 id_o = df_cuentas[df_cuentas['nombre'] == orig]['id'].values[0]
                 id_d = df_cuentas[df_cuentas['nombre'] == dest]['id'].values[0]
@@ -264,7 +256,7 @@ elif menu == "📝 Movimientos":
             df_edit,
             column_config={
                 "id": None,
-                "monto": st.column_config.NumberColumn(format="$%.2f"), # Excel style
+                "monto": st.column_config.NumberColumn(format="$%.2f"),
                 "fecha": st.column_config.DateColumn(),
             },
             hide_index=True, use_container_width=True, num_rows="dynamic", key="movs_edit"
@@ -283,7 +275,6 @@ elif menu == "📝 Movimientos":
 elif menu == "⚙️ Ajustes":
     st.header("Configuración")
     with st.container(border=True):
-        # Input limpio de Sueldo
         nuevo = st.number_input("Sueldo Base", value=int(sueldo), step=1000, format="%i")
         if st.button("Actualizar Sueldo"):
             supabase.table("configuracion").upsert({"clave": "sueldo_mensual", "valor": str(nuevo)}).execute()
