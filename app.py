@@ -1,33 +1,17 @@
 import streamlit as st
 import pandas as pd
 from supabase import create_client
-from datetime import date, timedelta, datetime
-from dateutil.relativedelta import relativedelta # Necesario para calcular mes anterior
+from datetime import date, datetime
+from dateutil.relativedelta import relativedelta
 import plotly.express as px
-import plotly.graph_objects as go
 import time
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
     page_title="Finanzas Lucas", 
     page_icon="💸", 
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
-
-# Estilos CSS personalizados para limpiar la interfaz
-st.markdown("""
-<style>
-    .stMetric {
-        background-color: #f0f2f6;
-        padding: 15px;
-        border-radius: 10px;
-    }
-    div[data-testid="stMetricValue"] {
-        font-size: 24px;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 # --- CONEXIÓN SUPABASE ---
 @st.cache_resource
@@ -42,11 +26,10 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- FUNCIONES BACKEND ---
+# --- FUNCIONES ---
 def get_data_maestros():
     cuentas = pd.DataFrame(supabase.table("cuentas").select("*").execute().data)
     categorias = pd.DataFrame(supabase.table("categorias").select("*").execute().data)
-    # Sueldo
     try:
         resp = supabase.table("configuracion").select("valor").eq("clave", "sueldo_mensual").execute()
         sueldo = float(resp.data[0]['valor']) if resp.data else 0.0
@@ -75,7 +58,6 @@ def get_movimientos_periodo(desde, hasta):
                 row['cuenta'] = d['cuentas']['nombre']
                 row['cuenta_tipo'] = d['cuentas']['tipo']
             
-            # Limpieza
             del row['categorias'], row['cuentas']
             rows.append(row)
         return pd.DataFrame(rows)
@@ -96,167 +78,184 @@ def actualizar_movimiento(id_mov, campo, valor):
 def borrar_movimiento(id_mov):
     supabase.table("movimientos").delete().eq("id", id_mov).execute()
 
-# --- DATOS INICIALES ---
+# --- DATOS ---
 df_cuentas, df_cats, sueldo = get_data_maestros()
 
-# --- SIDEBAR ---
+# --- SIDEBAR (Barra Lateral) ---
 with st.sidebar:
-    st.header("Gestión Financiera")
-    menu = st.radio("Ir a:", ["📊 Dashboard", "➕ Nuevo Movimiento", "📝 Historial / Edición", "📥 Importar"], label_visibility="collapsed")
+    st.image("https://cdn-icons-png.flaticon.com/512/2382/2382461.png", width=50)
+    st.title("Lucas Finanzas")
+    
+    menu = st.radio("Navegación", ["📊 Dashboard", "➕ Cargar", "📝 Movimientos", "⚙️ Ajustes"])
     
     st.divider()
-    
-    # Filtro Global
-    with st.expander("📅 Filtro de Fechas", expanded=True):
-        col_f1, col_f2 = st.columns(2)
-        # Por defecto: Mes actual
-        today = date.today()
-        start_month = today.replace(day=1)
-        fecha_inicio = col_f1.date_input("Desde", start_month, label_visibility="collapsed")
-        fecha_fin = col_f2.date_input("Hasta", today, label_visibility="collapsed")
+    st.subheader("📅 Periodo")
+    today = date.today()
+    fecha_inicio = st.date_input("Desde", today.replace(day=1))
+    fecha_fin = st.date_input("Hasta", today)
 
 # --- LÓGICA PRINCIPAL ---
 df = get_movimientos_periodo(fecha_inicio, fecha_fin)
 
 if menu == "📊 Dashboard":
-    st.title("Panorama Financiero")
-
-    # 1. CÁLCULO DE DELTAS (Comparativa con mes anterior)
-    # Buscamos datos del periodo anterior exacto
-    fecha_inicio_prev = fecha_inicio - relativedelta(months=1)
-    fecha_fin_prev = fecha_fin - relativedelta(months=1)
-    df_prev = get_movimientos_periodo(fecha_inicio_prev, fecha_fin_prev)
+    st.header(f"Resumen del Mes")
+    
+    # Cálculos
+    fecha_prev_ini = fecha_inicio - relativedelta(months=1)
+    fecha_prev_fin = fecha_fin - relativedelta(months=1)
+    df_prev = get_movimientos_periodo(fecha_prev_ini, fecha_prev_fin)
 
     gastos_now = df[df['tipo'].isin(['GASTO', 'PAGO_TARJETA'])]['monto'].sum() if not df.empty else 0
     gastos_prev = df_prev[df_prev['tipo'].isin(['GASTO', 'PAGO_TARJETA'])]['monto'].sum() if not df_prev.empty else 0
     
     ingresos_now = df[df['tipo'] == 'INGRESO']['monto'].sum() if not df.empty else 0
-    ingresos_prev = df_prev[df_prev['tipo'] == 'INGRESO']['monto'].sum() if not df_prev.empty else 0
+    total_ingresos = sueldo + ingresos_now
     
     delta_gastos = ((gastos_now - gastos_prev) / gastos_prev * 100) if gastos_prev > 0 else 0
-    
     consumo_tarjeta = df[df['tipo'] == 'COMPRA_TARJETA']['monto'].sum() if not df.empty else 0
+    disponible = total_ingresos - gastos_now
 
-    # 2. METRICAS PRINCIPALES
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    # --- KPIs CON NUEVO DISEÑO ---
+    col1, col2 = st.columns(2)
     
-    kpi1.metric("Ingresos Totales", f"${sueldo + ingresos_now:,.0f}", delta=f"${ingresos_now:,.0f} extra")
-    
-    # Lógica de colores invertida para gastos (Si bajó es verde/bueno)
-    kpi2.metric("Salidas Reales", f"${gastos_now:,.0f}", delta=f"{delta_gastos:.1f}% vs mes anterior", delta_color="inverse")
-    
-    kpi3.metric("Deuda Tarjeta", f"${consumo_tarjeta:,.0f}", help="Compras a crédito este mes")
-    
-    disponible = (sueldo + ingresos_now) - gastos_now
-    kpi4.metric("Disponible", f"${disponible:,.0f}")
+    with col1:
+        with st.container(border=True):
+            st.metric("✅ Disponible Hoy", f"${disponible:,.0f}", help="Sueldo + Extras - Gastos Reales")
+            st.caption(f"Ingresos Totales: ${total_ingresos:,.0f}")
 
+    with col2:
+        with st.container(border=True):
+            # Lógica de color para el delta (Si gastaste menos es verde)
+            delta_color = "normal" if delta_gastos < 0 else "inverse"
+            st.metric("💸 Salidas Reales", f"${gastos_now:,.0f}", delta=f"{delta_gastos:.1f}% vs mes pasado", delta_color=delta_color)
+            st.caption(f"Deuda Tarjeta acumulada: ${consumo_tarjeta:,.0f}")
+
+    # --- GRÁFICOS ---
     st.divider()
-
-    # 3. GRÁFICOS INTERACTIVOS
-    c1, c2 = st.columns([2, 1])
+    c_chart1, c_chart2 = st.columns([2, 1])
     
-    with c1:
-        st.subheader("Evolución de Gastos (Últimos 6 meses)")
-        # Simulación de datos históricos (esto idealmente se trae con una query agrupada)
-        # Para esta versión V3, hacemos un gráfico simple del mes actual por día
+    with c_chart1:
+        st.subheader("Gastos Diarios")
         if not df.empty:
-            df_diario = df[df['tipo'] == 'GASTO'].groupby('fecha')['monto'].sum().reset_index()
-            fig_bar = px.bar(df_diario, x='fecha', y='monto', color_discrete_sequence=['#ff4b4b'])
-            fig_bar.update_layout(xaxis_title=None, yaxis_title=None, showlegend=False, height=300)
-            st.plotly_chart(fig_bar, use_container_width=True)
+            df_gasto_diario = df[df['tipo'] == 'GASTO'].groupby('fecha')['monto'].sum().reset_index()
+            fig = px.bar(df_gasto_diario, x='fecha', y='monto', color_discrete_sequence=['#FF4B4B'])
+            fig.update_layout(xaxis_title="", yaxis_title="", height=250, margin=dict(l=0, r=0, t=0, b=0))
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Sin datos para graficar.")
+            st.info("No hay gastos registrados.")
 
-    with c2:
-        st.subheader("Top Categorías")
+    with c_chart2:
+        st.subheader("Categorías")
         if not df.empty:
-            df_pie = df[df['tipo'].isin(['GASTO', 'COMPRA_TARJETA'])]
-            if not df_pie.empty:
-                fig_pie = px.donut(df_pie, values='monto', names='categoria', hole=0.6)
-                fig_pie.update_layout(showlegend=False, height=300, margin=dict(t=0, b=0, l=0, r=0))
+            df_cat = df[df['tipo'].isin(['GASTO', 'COMPRA_TARJETA'])].groupby('categoria')['monto'].sum().reset_index()
+            if not df_cat.empty:
+                fig_pie = px.pie(df_cat, values='monto', names='categoria', hole=0.5)
+                fig_pie.update_layout(showlegend=False, height=250, margin=dict(l=0, r=0, t=0, b=0))
                 st.plotly_chart(fig_pie, use_container_width=True)
             else:
                 st.write("Sin consumos.")
-        else:
-            st.write("Sin datos.")
 
-elif menu == "➕ Nuevo Movimiento":
-    st.title("Carga Rápida")
+elif menu == "➕ Cargar":
+    st.header("Nueva Operación")
     
-    # Usamos tabs para organizar mejor visualmente
-    tab_gasto, tab_ingreso, tab_transf = st.tabs(["💸 Gasto / Compra", "💰 Ingreso", "🔄 Transferencia"])
+    tipo_op = st.segmented_control("Tipo", ["Gasto", "Ingreso", "Transferencia"], default="Gasto")
     
-    with tab_gasto:
-        with st.form("form_gasto_rapido", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            monto = c1.number_input("Monto ($)", min_value=1.0, step=100.0, format="%.2f")
-            desc = c2.text_input("Descripción", placeholder="Ej: Supermercado")
+    with st.container(border=True):
+        c1, c2 = st.columns(2)
+        fecha = c1.date_input("Fecha", date.today())
+        monto = c2.number_input("Monto ($)", min_value=1.0, step=100.0, format="%.2f")
+        desc = st.text_input("Descripción", placeholder="Ej: Supermercado Coto")
+
+        if tipo_op == "Gasto":
+            c3, c4 = st.columns(2)
+            cuenta = c3.selectbox("Medio de Pago", df_cuentas['nombre'])
+            cat = c4.selectbox("Categoría", df_cats['nombre'])
             
-            c3, c4, c5 = st.columns(3)
-            cuenta = c3.selectbox("Pagado con:", df_cuentas['nombre'])
-            cat = c4.selectbox("Categoría:", df_cats['nombre'])
-            fecha = c5.date_input("Fecha", date.today())
-            
-            if st.form_submit_button("Guardar Gasto", use_container_width=True):
-                # Lógica de IDs
+            if st.button("Guardar Gasto", type="primary", use_container_width=True):
                 id_cta = df_cuentas[df_cuentas['nombre'] == cuenta]['id'].values[0]
                 id_cat = df_cats[df_cats['nombre'] == cat]['id'].values[0]
                 es_credito = df_cuentas[df_cuentas['nombre'] == cuenta]['tipo'].values[0] == 'CREDITO'
-                tipo = "COMPRA_TARJETA" if es_credito else "GASTO"
+                tipo_db = "COMPRA_TARJETA" if es_credito else "GASTO"
                 
-                guardar_movimiento(fecha, monto, desc, id_cta, id_cat, tipo)
-                st.toast(f"✅ Gasto de ${monto} guardado!", icon="🎉")
-                time.sleep(1) # Pequeña pausa para ver el toast
+                guardar_movimiento(fecha, monto, desc, id_cta, id_cat, tipo_db)
+                st.success("¡Gasto guardado!")
+                time.sleep(1)
+                st.rerun()
 
-    with tab_ingreso:
-        # Formulario similar simplificado...
-        if st.button("Registrar Ingreso (Sueldo)"):
-            st.info("Configurá esto en la pestaña Dashboard o Configuración")
+        elif tipo_op == "Ingreso":
+            cuenta = st.selectbox("Destino", df_cuentas['nombre'])
+            cat_nom = st.selectbox("Categoría", df_cats['nombre']) # Idealmente filtrar solo Ingresos
+            if st.button("Guardar Ingreso", type="primary", use_container_width=True):
+                id_cta = df_cuentas[df_cuentas['nombre'] == cuenta]['id'].values[0]
+                id_cat = df_cats[df_cats['nombre'] == cat_nom]['id'].values[0]
+                guardar_movimiento(fecha, monto, desc, id_cta, id_cat, "INGRESO")
+                st.success("¡Ingreso guardado!")
+                time.sleep(1)
+                st.rerun()
+                
+        elif tipo_op == "Transferencia":
+            c_orig, c_dest = st.columns(2)
+            orig = c_orig.selectbox("Desde", df_cuentas['nombre'])
+            dest = c_dest.selectbox("Hacia", df_cuentas['nombre'])
+            
+            if st.button("Transferir", type="primary", use_container_width=True):
+                id_orig = df_cuentas[df_cuentas['nombre'] == orig]['id'].values[0]
+                id_dest = df_cuentas[df_cuentas['nombre'] == dest]['id'].values[0]
+                id_cat = df_cats.iloc[0]['id']
+                guardar_movimiento(fecha, monto, f"Transferencia a {dest}", id_orig, id_cat, "TRANSFERENCIA", id_dest)
+                st.success("Transferencia realizada!")
+                time.sleep(1)
+                st.rerun()
 
-elif menu == "📝 Historial / Edición":
-    st.title("Base de Datos Editable")
-    st.info("💡 Hacé doble clic en una celda para editar el Monto o la Descripción. Para borrar, seleccioná la fila y apretá Borrar.")
+elif menu == "📝 Movimientos":
+    st.header("Historial")
+    st.info("💡 Doble click en una celda para editar.")
     
     if not df.empty:
-        # Preparamos el DF para el editor
         df_edit = df[['id', 'fecha', 'descripcion', 'monto', 'cuenta', 'categoria', 'tipo']].copy()
         
-        # EDITOR DE DATOS (NUEVO FEATURE DE STREAMLIT)
         edited_df = st.data_editor(
             df_edit,
             column_config={
-                "id": None, # Oculto
+                "id": None, # Ocultar ID
                 "monto": st.column_config.NumberColumn("Monto", format="$%.2f"),
                 "fecha": st.column_config.DateColumn("Fecha"),
                 "tipo": st.column_config.SelectboxColumn("Tipo", options=["GASTO", "INGRESO", "COMPRA_TARJETA"]),
+                "categoria": st.column_config.TextColumn("Categoría", disabled=True), # Bloqueado por ahora
+                "cuenta": st.column_config.TextColumn("Cuenta", disabled=True),
             },
             hide_index=True,
             use_container_width=True,
-            num_rows="dynamic", # Permite agregar/borrar filas
-            key="data_editor"
+            num_rows="dynamic",
+            key="editor_movimientos"
         )
         
-        # Detectar cambios y guardar en Supabase
         if st.button("💾 Guardar Cambios"):
-            # Streamlit devuelve los cambios en st.session_state['data_editor']
-            changes = st.session_state['data_editor']
+            cambios = st.session_state['editor_movimientos']
             
-            # 1. Filas editadas
-            for idx, updates in changes['edited_rows'].items():
-                row_id = df_edit.iloc[idx]['id']
-                for key, value in updates.items():
-                    actualizar_movimiento(row_id, key, value)
+            # Updates
+            for idx, updates in cambios['edited_rows'].items():
+                rid = df_edit.iloc[idx]['id']
+                for k, v in updates.items():
+                    actualizar_movimiento(rid, k, v)
             
-            # 2. Filas borradas
-            for idx in changes['deleted_rows']:
-                row_id = df_edit.iloc[idx]['id']
-                borrar_movimiento(row_id)
+            # Deletes
+            for idx in cambios['deleted_rows']:
+                rid = df_edit.iloc[idx]['id']
+                borrar_movimiento(rid)
                 
-            st.toast("Base de datos actualizada!", icon="💾")
+            st.toast("¡Actualizado con éxito!")
             time.sleep(1)
             st.rerun()
+    else:
+        st.write("No hay datos para mostrar.")
 
-elif menu == "📥 Importar":
-    st.title("Importación Masiva")
-    st.file_uploader("Arrastrá CSV de Mercado Pago o Banco", type=["csv"])
-    st.caption("Esta funcionalidad sigue igual que la versión anterior.")
+elif menu == "⚙️ Ajustes":
+    st.header("Configuración")
+    with st.container(border=True):
+        nuevo_sueldo = st.number_input("Sueldo Mensual Base", value=sueldo, step=10000.0)
+        if st.button("Actualizar Sueldo"):
+            supabase.table("configuracion").upsert({"clave": "sueldo_mensual", "valor": str(nuevo_sueldo)}).execute()
+            st.success("Sueldo actualizado.")
+            time.sleep(1)
+            st.rerun()
