@@ -18,6 +18,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 # Usamos SERVICE_ROLE_KEY para que el bot tenga permisos de escritura totales
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_KEY")
+# Tu variable en Render se llama TELEGRAM_SECRET, así que la leemos de ahí
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_SECRET")
 # Tu ID numérico de Telegram por seguridad (opcional pero recomendado)
 ALLOWED_USER_ID = os.environ.get("ALLOWED_USER_ID")
@@ -204,7 +205,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def lifespan(app: FastAPI):
     # --- ARRANQUE ---
     if not TELEGRAM_TOKEN:
-        logger.error("No se encontró TELEGRAM_TOKEN. El bot no arrancará.")
+        logger.error("No se encontró TELEGRAM_SECRET. El bot no arrancará.")
         yield
         return
 
@@ -215,22 +216,37 @@ async def lifespan(app: FastAPI):
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Inicializar y arrancar el bot
+    # Inicializar el bot
     await bot_app.initialize()
+    
+    # --- FIX IMPORTANTE: Limpiar webhooks previos ---
+    # Esto soluciona el error "Conflict: terminated by other getUpdates request"
+    try:
+        await bot_app.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook eliminado correctamente.")
+    except Exception as e:
+        logger.warning(f"No se pudo eliminar el webhook (no es crítico si ya estaba polling): {e}")
+
+    # Arrancar el bot
     await bot_app.start()
     
-    # Comenzar el polling en modo no bloqueante
+    # Comenzar el polling
     await bot_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     
     logger.info("🤖 Bot de Telegram iniciado correctamente!")
     
-    yield # Aquí FastAPI ejecuta el servidor web
+    yield # Aquí FastAPI ejecuta el servidor web (Keep-Alive)
     
     # --- APAGADO ---
     logger.info("🛑 Deteniendo Bot de Telegram...")
-    await bot_app.updater.stop()
-    await bot_app.stop()
-    await bot_app.shutdown()
+    try:
+        if bot_app.updater.running:
+            await bot_app.updater.stop()
+        if bot_app.running:
+            await bot_app.stop()
+        await bot_app.shutdown()
+    except Exception as e:
+        logger.error(f"Error al apagar: {e}")
 
 # ==========================================
 # 5. APP FASTAPI (Keep-Alive para Render)
