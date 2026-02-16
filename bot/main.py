@@ -16,6 +16,10 @@ ALLOWED_CHAT_ID = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID")  # opcional
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 app = FastAPI()
 
+@app.get("/")
+def health():
+    return {"ok": True, "service": "telegram-bot"}
+
 
 # ======================
 # Helpers
