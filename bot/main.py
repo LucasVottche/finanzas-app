@@ -3,7 +3,7 @@ import re
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta  # <--- AQUÍ FALTABA TIMEDELTA
 from dateutil.relativedelta import relativedelta
 
 from fastapi import FastAPI
@@ -56,23 +56,32 @@ def get_category_general():
 
 def get_monthly_balance():
     try:
+        # Fechas
         today = date.today()
         first_day = date(today.year, today.month, 1)
+        # Aquí fallaba antes por falta de timedelta
         last_day = first_day + relativedelta(months=1) - timedelta(days=1)
         
+        logger.info(f"🔍 Consultando balance desde {first_day} hasta {last_day}")
+
+        # Consulta DB
         res = supabase.table("movimientos")\
-            .select("tipo, monto")\
+            .select("tipo, monto, fecha")\
             .gte("fecha", str(first_day))\
             .lte("fecha", str(last_day))\
             .execute()
         
         data = res.data or []
+        
+        # LOG PARA DEBUG: Ver qué devuelve Supabase en la consola de Render
+        logger.info(f"📊 Datos encontrados: {len(data)} movimientos")
+        
         ingresos = sum(d['monto'] for d in data if d['tipo'] == 'INGRESO')
         gastos = sum(d['monto'] for d in data if d['tipo'] in ['GASTO', 'COMPRA_TARJETA'])
         
         return ingresos, gastos
     except Exception as e:
-        logger.error(f"Error balance: {e}")
+        logger.error(f"❌ Error calculando balance: {e}")
         return 0, 0
 
 # ==========================================
@@ -83,8 +92,13 @@ async def reply_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Función dedicada a enviar el saldo."""
     ing, gas = get_monthly_balance()
     neto = ing - gas
+    
+    # Nombre del mes en español simple
+    meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+    mes_nombre = meses[date.today().month - 1]
+
     await update.message.reply_text(
-        f"📅 *Balance {date.today().strftime('%B').title()}*\n\n"
+        f"📅 *Balance {mes_nombre}*\n\n"
         f"📥 Ingresos: `{fmt_money(ing)}`\n"
         f"🛒 Consumo:  `{fmt_money(gas)}`\n"
         f"-------------------\n"
@@ -133,7 +147,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- BOTONES ---
     if text == "💰 Balance Mes":
-        await reply_balance(update, context) # Llamada directa a la función corregida
+        await reply_balance(update, context)
         return
 
     if text == "❓ Ayuda":
@@ -251,16 +265,9 @@ async def lifespan(app: FastAPI):
 
     bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    # Comandos
     bot_app.add_handler(CommandHandler("start", start))
-    
-    # AQUÍ ESTÁ EL ARREGLO:
-    # En lugar de usar una lambda compleja con _replace, llamamos directamente a la función
-    bot_app.add_handler(CommandHandler("saldo", reply_balance))
-    
+    bot_app.add_handler(CommandHandler("saldo", reply_balance)) # Handler directo
     bot_app.add_handler(CommandHandler("ayuda", help_command))
-    
-    # Mensajes de texto (y botones)
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     await bot_app.initialize()
