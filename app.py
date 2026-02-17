@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 import calendar
 from dateutil.relativedelta import relativedelta
 import plotly.express as px
+import plotly.graph_objects as go
 import time
 import re
 import math
@@ -498,7 +499,7 @@ with st.sidebar:
     st.markdown('<div class="sidebar-brand">🦅 Finanzas Pro</div>', unsafe_allow_html=True)
     menu = st.radio(
         "Navegación",
-        ["📊 Dashboard", "📅 Calendario", "➕ Nueva Operación", "🎯 Metas", "📝 Historial", "💳 Tarjetas", "⚙️ Ajustes"],
+        ["📊 Dashboard", "📅 Calendario", "➕ Nueva Operación", "📈 Inversiones", "🎯 Metas", "📝 Historial", "💳 Tarjetas", "⚙️ Ajustes"],
         label_visibility="collapsed"
     )
     st.markdown("---")
@@ -571,15 +572,15 @@ if menu == "📊 Dashboard":
                         card_id = str(card["id"])
 
                         stmt_total = df_tj_ext[(df_tj_ext["cuenta_id"] == card_id) &
-                                              (df_tj_ext["fecha"] >= stmt_start) &
-                                              (df_tj_ext["fecha"] <= stmt_end)]["monto"].sum()
+                                                (df_tj_ext["fecha"] >= stmt_start) &
+                                                (df_tj_ext["fecha"] <= stmt_end)]["monto"].sum()
 
                         pagos = 0.0
                         if not df_mov_ext.empty:
                             pagos = df_mov_ext[(df_mov_ext["tipo"] == "PAGO_TARJETA") &
-                                               (df_mov_ext["cuenta_destino_id"].astype(str) == card_id) &
-                                               (df_mov_ext["fecha"] >= cierre) &
-                                               (df_mov_ext["fecha"] <= vto)]["monto"].sum()
+                                                (df_mov_ext["cuenta_destino_id"].astype(str) == card_id) &
+                                                (df_mov_ext["fecha"] >= cierre) &
+                                                (df_mov_ext["fecha"] <= vto)]["monto"].sum()
                         pagar_resumen_mes += max(stmt_total - pagos, 0.0)
 
         caja_real = total_ingresos - gastos_cash - pagar_resumen_mes
@@ -602,9 +603,31 @@ if menu == "📊 Dashboard":
             df_chart = pd.concat([df_chart, df_tj_chart], ignore_index=True)
 
         with g1:
-            st.markdown("##### 📈 Evolución")
+            st.markdown("##### 📈 Evolución y Proyección")
             if not df_chart.empty:
+                # --- A. Proyección de Gastos (Forecasting) ---
+                df_chart_sorted = df_chart.sort_values("fecha")
+                df_acum = df_chart_sorted.groupby("fecha")["monto"].sum().reset_index()
+                df_acum["acumulado"] = df_acum["monto"].cumsum()
+
+                # Crear el gráfico base
                 fig = px.bar(df_chart, x="fecha", y="monto", color="categoria")
+                
+                # Proyección lineal simple
+                if f_ini.month == date.today().month and f_ini.year == date.today().year:
+                    dias_pasados = date.today().day
+                    dias_total_mes = calendar.monthrange(f_ini.year, f_ini.month)[1]
+                    gasto_actual = total_consumo
+                    
+                    if dias_pasados > 0:
+                        proyeccion_total = (gasto_actual / dias_pasados) * dias_total_mes
+                        
+                        # Agregar línea de proyección
+                        fig.add_hline(y=proyeccion_total/dias_total_mes, line_dash="dot", 
+                                      annotation_text=f"Proyección Fin Mes: {fmt_ars(proyeccion_total)}", 
+                                      annotation_position="top left",
+                                      line_color="red")
+
                 fig.update_layout(xaxis_title=None, yaxis_title=None, height=320, margin=dict(l=0, r=0, t=0, b=0))
                 st.plotly_chart(fig, use_container_width=True)
             else:
@@ -618,6 +641,36 @@ if menu == "📊 Dashboard":
                 st.plotly_chart(fig_p, use_container_width=True)
             else:
                 st.info("Sin rubros.")
+        
+        # --- B. Gestión de Presupuestos por Categoría (Visualización) ---
+        st.divider()
+        st.markdown("##### 🚥 Presupuestos")
+        if not df_chart.empty and not df_cat.empty:
+            gastos_por_cat = df_chart.groupby("categoria")["monto"].sum().reset_index()
+            # Crear un mapeo de nombre de categoría a presupuesto
+            # Primero necesitamos asegurarnos que df_cat tiene la columna presupuesto_mensual, si no la creamos temporalmente
+            if "presupuesto_mensual" not in df_cat.columns:
+                df_cat["presupuesto_mensual"] = 0.0
+            
+            cat_map_presupuesto = dict(zip((df_cat["icono"].fillna("") + " " + df_cat["nombre"]).str.strip(), df_cat["presupuesto_mensual"]))
+            
+            cols = st.columns(3)
+            idx = 0
+            for _, row in gastos_por_cat.iterrows():
+                cat_name = row["categoria"]
+                gasto = row["monto"]
+                presupuesto = cat_map_presupuesto.get(cat_name, 0.0)
+                
+                if presupuesto > 0:
+                    pct = min(gasto / presupuesto, 1.0)
+                    delta_color = "normal" if pct < 0.8 else ("off" if pct < 1.0 else "inverse")
+                    
+                    with cols[idx % 3]:
+                        st.metric(f"{cat_name}", fmt_ars(gasto), f"{pct*100:.0f}% de {fmt_ars(presupuesto)}", delta_color="inverse" if pct >= 1.0 else "normal")
+                        st.progress(pct, text=None)
+                    idx += 1
+            if idx == 0:
+                st.caption("No hay presupuestos definidos. Ve a Ajustes para configurarlos.")
 
 # =========================================================
 # 12) CALENDARIO
@@ -907,7 +960,49 @@ elif menu == "➕ Nueva Operación":
                 st.error(f"Error importando: {e}")
 
 # =========================================================
-# 14) METAS
+# 14) INVERSIONES (Nuevo)
+# =========================================================
+elif "Inversiones" in menu:
+    st.markdown("### 📈 Inversiones")
+    
+    # 1. Registrar Inversión
+    with st.expander("Registrar Nueva Inversión", expanded=False):
+        c1, c2 = st.columns(2)
+        f_inv = c1.date_input("Fecha", date.today(), key="f_inv")
+        m_inv = c2.number_input("Monto ($)", min_value=0.0, step=1000.0, key="m_inv")
+        d_inv = st.text_input("Detalle (ej: Dolar MEP, CEDEAR Apple)", key="d_inv")
+        
+        c3, c4 = st.columns(2)
+        cta_orig = c3.selectbox("Cuenta Origen (Sale dinero)", df_cta[df_cta["tipo"]!="CREDITO"]["nombre"].tolist() if not df_cta.empty else [], key="cta_inv")
+        cat_inv = "Inversiones" # Asumimos que existe o se usa General
+        
+        if st.button("Registrar Inversión", type="primary"):
+            if cta_orig:
+                id_c = df_cta[df_cta["nombre"] == cta_orig]["id"].values[0]
+                # Buscar o usar categoría General
+                cat_id = df_cat[df_cat["nombre"] == "General"]["id"].values[0] if not df_cat[df_cat["nombre"] == "Inversiones"].empty else df_cat.iloc[0]["id"]
+                
+                # Guardamos como TRANSFERENCIA para que no sume al gasto de consumo, pero reste caja
+                db_save_mov(f_inv, m_inv, f"Inversión: {d_inv}", id_c, cat_id, "TRANSFERENCIA", source="manual")
+                st.toast("✅ Inversión registrada")
+                time.sleep(0.5); st.rerun()
+    
+    # 2. Ver Historial Inversiones (Filtrando por descripción o tipo)
+    # Nota: Como usamos TRANSFERENCIA, filtramos por descripción que empiece con "Inversión:"
+    df_inv = get_movimientos(date(2024,1,1), date(2025,12,31)) # Traer todo o ajustar rango
+    if not df_inv.empty:
+        df_inv = df_inv[df_inv["descripcion"].str.contains("Inversión:", case=False, na=False)]
+    
+    if not df_inv.empty:
+        st.markdown("#### Historial")
+        st.dataframe(df_inv[["fecha", "descripcion", "monto", "cuenta"]], use_container_width=True)
+        total_inv = df_inv["monto"].sum()
+        st.metric("Total Invertido", fmt_ars(total_inv))
+    else:
+        st.info("No hay inversiones registradas.")
+
+# =========================================================
+# 15) METAS
 # =========================================================
 elif "Metas" in menu:
     st.markdown("### 🎯 Objetivos")
@@ -945,7 +1040,7 @@ elif "Metas" in menu:
             st.info("Sin metas.")
 
 # =========================================================
-# 15) HISTORIAL
+# 16) HISTORIAL
 # =========================================================
 elif "Historial" in menu:
     st.markdown("### 📝 Historial")
@@ -1008,7 +1103,7 @@ elif "Historial" in menu:
             st.info("Sin compras tarjeta en el rango.")
 
 # =========================================================
-# 16) TARJETAS (mejorado)
+# 17) TARJETAS (mejorado)
 # =========================================================
 elif "Tarjetas" in menu:
     st.markdown("### 💳 Tarjetas")
@@ -1051,19 +1146,19 @@ elif "Tarjetas" in menu:
                     open_end = hoy
 
                     stmt_total = df_tj_ext[(df_tj_ext["cuenta_id"] == card_id) &
-                                           (df_tj_ext["fecha"] >= stmt_start) &
-                                           (df_tj_ext["fecha"] <= stmt_end)]["monto"].sum()
+                                            (df_tj_ext["fecha"] >= stmt_start) &
+                                            (df_tj_ext["fecha"] <= stmt_end)]["monto"].sum()
 
                     open_total = df_tj_ext[(df_tj_ext["cuenta_id"] == card_id) &
-                                           (df_tj_ext["fecha"] >= open_start) &
-                                           (df_tj_ext["fecha"] <= open_end)]["monto"].sum()
+                                            (df_tj_ext["fecha"] >= open_start) &
+                                            (df_tj_ext["fecha"] <= open_end)]["monto"].sum()
 
                     pagos = 0.0
                     if not df_mov_ext.empty:
                         pagos = df_mov_ext[(df_mov_ext["tipo"] == "PAGO_TARJETA") &
-                                           (df_mov_ext["cuenta_destino_id"].astype(str) == card_id) &
-                                           (df_mov_ext["fecha"] >= cierre) &
-                                           (df_mov_ext["fecha"] <= vto)]["monto"].sum()
+                                            (df_mov_ext["cuenta_destino_id"].astype(str) == card_id) &
+                                            (df_mov_ext["fecha"] >= cierre) &
+                                            (df_mov_ext["fecha"] <= vto)]["monto"].sum()
 
                     saldo_pend = max(stmt_total - pagos, 0.0)
 
@@ -1150,7 +1245,7 @@ elif "Tarjetas" in menu:
                             st.write("**Movimientos del resumen**")
                             if not df_stmt.empty:
                                 st.dataframe(df_stmt[["fecha","descripcion","monto","categoria"]].sort_values("fecha"),
-                                             use_container_width=True, hide_index=True)
+                                                use_container_width=True, hide_index=True)
                             else:
                                 st.caption("Nada para mostrar.")
 
@@ -1158,9 +1253,9 @@ elif "Tarjetas" in menu:
                             df_p = pd.DataFrame()
                             if not df_mov_ext.empty:
                                 df_p = df_mov_ext[(df_mov_ext["tipo"] == "PAGO_TARJETA") &
-                                                  (df_mov_ext["cuenta_destino_id"].astype(str) == card_id) &
-                                                  (df_mov_ext["fecha"] >= cierre) &
-                                                  (df_mov_ext["fecha"] <= vto)][["fecha","descripcion","monto","cuenta"]].copy()
+                                                    (df_mov_ext["cuenta_destino_id"].astype(str) == card_id) &
+                                                    (df_mov_ext["fecha"] >= cierre) &
+                                                    (df_mov_ext["fecha"] <= vto)][["fecha","descripcion","monto","cuenta"]].copy()
                             if not df_p.empty:
                                 st.dataframe(df_p.sort_values("fecha"), use_container_width=True, hide_index=True)
                             else:
@@ -1197,7 +1292,7 @@ elif "Tarjetas" in menu:
                             st.rerun()
 
 # =========================================================
-# 17) AJUSTES
+# 18) AJUSTES
 # =========================================================
 elif "Ajustes" in menu:
     st.markdown("### ⚙️ Ajustes")
@@ -1213,6 +1308,20 @@ elif "Ajustes" in menu:
             time.sleep(0.3)
             st.rerun()
 
+    # PRESUPUESTOS (NUEVO)
+    st.markdown("#### Presupuestos por Categoría")
+    with st.expander("Configurar Presupuestos"):
+        for _, cat in df_cat.iterrows():
+            with st.container():
+                c1, c2, c3 = st.columns([3, 2, 1])
+                c1.write(f"{cat['icono'] or ''} {cat['nombre']}")
+                current_budget = float(cat.get("presupuesto_mensual") or 0.0)
+                new_budget = c2.number_input("Monto Mensual", value=current_budget, key=f"pres_{cat['id']}")
+                if c3.button("Guardar", key=f"btn_pres_{cat['id']}"):
+                    supabase.table("categorias").update({"presupuesto_mensual": new_budget}).eq("id", cat['id']).execute()
+                    invalidate_caches()
+                    st.toast(f"Presupuesto {cat['nombre']} actualizado")
+    
     # fijos
     st.markdown("#### Fijos")
     with st.form("add_sus"):
@@ -1238,4 +1347,3 @@ elif "Ajustes" in menu:
             st.rerun()
     else:
         st.caption("No hay fijos.")
-
