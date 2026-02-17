@@ -45,15 +45,6 @@ def get_account_by_name(name):
         return cuentas[0] if cuentas else None
     except: return None
 
-def get_category_general():
-    try:
-        res = supabase.table("categorias").select("*").execute()
-        cats = res.data or []
-        for cat in cats:
-            if "general" in cat['nombre'].lower(): return cat
-        return cats[0] if cats else None
-    except: return None
-
 def get_base_salary():
     """Busca el sueldo base en la tabla configuracion."""
     try:
@@ -65,17 +56,69 @@ def get_base_salary():
         logger.error(f"Error obteniendo sueldo base: {e}")
         return 0.0
 
+# --- NUEVA FUNCIÓN: Categorización Inteligente ---
+def get_smart_category(description):
+    """
+    Busca palabras clave en la descripción y devuelve la categoría correspondiente.
+    Si no encuentra coincidencia, devuelve 'General'.
+    """
+    text = description.lower()
+    
+    # Diccionario de palabras clave -> Nombre de Categoría (tal cual está en tu DB)
+    # Asegúrate que las 'Keys' (Transporte, Supermercado) coincidan con los nombres en tu tabla 'categorias'
+    keywords_map = {
+        "Comida": ["mcdonald", "burger", "pizza", "restaurante", "cena", "almuerzo", "delivery", "pedidosya", "rappi", "cafe", "starbucks"],
+        "Supermercado": ["coto", "dia", "jumbo", "carrefour", "super", "chino", "vea", "chango", "disco", "carniceria", "verduleria"],
+        "Transporte": ["uber", "taxi", "nafta", "cabify", "sube", "tren", "bondi", "colectivo", "peaje", "estacionamiento", "shell", "ypf", "axion"],
+        "Servicios": ["luz", "gas", "internet", "celular", "claro", "personal", "movistar", "flow", "cable", "edenor", "edesur", "metrogas"],
+        "Salud": ["farmacia", "medico", "doctor", "remedios", "obra social", "dentista"],
+        "Salidas": ["cine", "bar", "boliche", "teatro", "entrada", "recital"],
+        "Ropa": ["zapatillas", "remera", "pantalon", "nike", "adidas", "zara", "shopping"]
+    }
+
+    try:
+        # 1. Traer todas las categorías de la DB
+        res = supabase.table("categorias").select("*").execute()
+        all_cats = res.data or []
+        
+        target_cat_name = "General" # Default
+
+        # 2. Buscar coincidencias
+        found = False
+        for cat_name, terms in keywords_map.items():
+            for term in terms:
+                if term in text:
+                    target_cat_name = cat_name
+                    found = True
+                    break
+            if found: break
+        
+        # 3. Buscar el ID de la categoría detectada (o General)
+        # Intentamos buscar la categoría detectada
+        for cat in all_cats:
+            if target_cat_name.lower() in cat['nombre'].lower():
+                return cat
+        
+        # Si la categoría detectada (ej: Transporte) no existe en la DB, buscamos General
+        for cat in all_cats:
+            if "general" in cat['nombre'].lower() or "varios" in cat['nombre'].lower():
+                return cat
+                
+        # Fallback final: devolver la primera que encuentre
+        return all_cats[0] if all_cats else None
+
+    except Exception as e:
+        logger.error(f"Error detectando categoría: {e}")
+        return None
+
 def get_monthly_balance():
     try:
-        # Fechas
         today = date.today()
         first_day = date(today.year, today.month, 1)
         last_day = first_day + relativedelta(months=1) - timedelta(days=1)
         
-        # 1. Obtener Sueldo Base (Configuración)
         sueldo_base = get_base_salary()
 
-        # 2. Obtener Movimientos (Ingresos y Gastos)
         res = supabase.table("movimientos")\
             .select("tipo, monto")\
             .gte("fecha", str(first_day))\
@@ -83,29 +126,22 @@ def get_monthly_balance():
             .execute()
         
         data = res.data or []
-        
-        # Sumar movimientos manuales
         ingresos_registrados = sum(d['monto'] for d in data if d['tipo'] == 'INGRESO')
         gastos = sum(d['monto'] for d in data if d['tipo'] in ['GASTO', 'COMPRA_TARJETA'])
         
-        # Lógica de la App: Si hay ingresos manuales, usarlos. Si no, usar el sueldo base.
         total_ingresos = ingresos_registrados if ingresos_registrados > 0 else sueldo_base
-
         return total_ingresos, gastos
-
     except Exception as e:
         logger.error(f"❌ Error calculando balance: {e}")
         return 0, 0
 
 # ==========================================
-# 3. LÓGICA REUTILIZABLE
+# 3. HANDLERS
 # ==========================================
 
 async def reply_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Función dedicada a enviar el saldo."""
     ing, gas = get_monthly_balance()
     neto = ing - gas
-    
     meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
     mes_nombre = meses[date.today().month - 1]
 
@@ -119,21 +155,14 @@ async def reply_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def show_menu(update: Update):
-    """Muestra el teclado persistente."""
-    keyboard = [
-        [KeyboardButton("💰 Balance Mes"), KeyboardButton("❓ Ayuda")]
-    ]
+    keyboard = [[KeyboardButton("💰 Balance Mes"), KeyboardButton("❓ Ayuda")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("¿Qué quieres hacer?", reply_markup=reply_markup)
-
-# ==========================================
-# 4. HANDLERS (COMANDOS Y MENSAJES)
-# ==========================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Bot Finanzas Pro*\n\n"
-        "Escribe un gasto (ej: `1500 Cena`) o usa los botones de abajo.",
+        "Escribe un gasto (ej: `1500 Cena`) o usa los botones.",
         parse_mode=ParseMode.MARKDOWN
     )
     await show_menu(update)
@@ -142,12 +171,76 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "💡 *Guía Rápida:*\n\n"
         "1️⃣ *Carga Simple:* `1500 Super`\n"
-        "2️⃣ *Fecha Específica:* `50000 Alquiler 2026-04-01`\n"
-        "3️⃣ *Tarjeta:* `25000 Zapatillas Visa`\n"
-        "4️⃣ *Ingreso:* Usa la App web o configura una palabra clave.\n\n"
-        "_Toca los botones de abajo para ver tu saldo._"
+        "2️⃣ *Fecha:* `50000 Alquiler 2026-04-01`\n"
+        "3️⃣ *Tarjeta:* `25000 Nike Visa`\n"
+        "4️⃣ *Deshacer:* Usa /deshacer para borrar el último.\n\n"
+        "✨ *Auto-Categorías:* Si escribes 'Uber', 'Coto', 'Farmacia', etc., lo detecto solo."
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+# --- NUEVO COMANDO: DESHACER ---
+async def undo_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        # 1. Buscar último movimiento normal
+        last_mov = supabase.table("movimientos")\
+            .select("*").eq("source", "telegram_bot")\
+            .order("created_at", desc=True).limit(1).execute()
+        
+        # 2. Buscar última compra tarjeta
+        last_card = supabase.table("compras_tarjeta")\
+            .select("*").eq("source", "telegram_bot")\
+            .order("created_at", desc=True).limit(1).execute()
+        
+        mov_data = last_mov.data[0] if last_mov.data else None
+        card_data = last_card.data[0] if last_card.data else None
+        
+        to_delete = None
+        table_name = ""
+        type_desc = ""
+
+        # 3. Comparar fechas para ver cuál es más reciente
+        if mov_data and card_data:
+            t_mov = datetime.fromisoformat(mov_data['created_at'].replace('Z', '+00:00'))
+            t_card = datetime.fromisoformat(card_data['created_at'].replace('Z', '+00:00'))
+            if t_mov > t_card:
+                to_delete = mov_data
+                table_name = "movimientos"
+                type_desc = "Gasto"
+            else:
+                to_delete = card_data
+                table_name = "compras_tarjeta"
+                type_desc = "Compra Tarjeta"
+        elif mov_data:
+            to_delete = mov_data
+            table_name = "movimientos"
+            type_desc = "Gasto"
+        elif card_data:
+            to_delete = card_data
+            table_name = "compras_tarjeta"
+            type_desc = "Compra Tarjeta"
+
+        # 4. Borrar
+        if to_delete:
+            desc = to_delete.get('descripcion', 'Sin descripción')
+            monto = to_delete.get('monto') or to_delete.get('monto_total')
+            
+            # Si es tarjeta, primero borramos las cuotas asociadas (por seguridad)
+            if table_name == "compras_tarjeta":
+                supabase.table("cuotas_tarjeta").delete().eq("compra_id", to_delete['id']).execute()
+
+            supabase.table(table_name).delete().eq("id", to_delete['id']).execute()
+            
+            await update.message.reply_text(
+                f"🗑️ *Eliminado Último Registro:*\n"
+                f"{type_desc}: {desc} (${monto})",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text("🤷‍♂️ No encontré movimientos recientes cargados por el bot para borrar.")
+
+    except Exception as e:
+        logger.error(f"Error undo: {e}")
+        await update.message.reply_text(f"❌ Error al deshacer: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -157,11 +250,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text
 
-    # --- BOTONES ---
     if text == "💰 Balance Mes":
         await reply_balance(update, context)
         return
-
     if text == "❓ Ayuda":
         await help_command(update, context)
         return
@@ -184,6 +275,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clean_text = clean_text.replace(fecha_str, '').strip()
         except: pass
 
+    # 1. Detectar Cuenta
     target_account = None
     try:
         all_accounts_res = supabase.table("cuentas").select("nombre, id, tipo").execute()
@@ -208,7 +300,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_account = get_account_by_name("Efectivo")
 
     descripcion = " ".join(desc_words) or "Gasto Telegram"
-    categoria = get_category_general()
+    
+    # 2. Detectar Categoría (NUEVA LÓGICA)
+    categoria = get_smart_category(descripcion)
 
     if not target_account or not categoria:
         await update.message.reply_text("❌ Error: Faltan cuentas/categorías en DB.")
@@ -238,6 +332,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     f"💳 *Tarjeta Detectada*\n\n"
                     f"📝 *Desc:* {descripcion}\n"
+                    f"📂 *Cat:* {categoria['nombre']}\n"
                     f"💲 *Monto:* `{fmt_money(monto)}`\n"
                     f"🏦 *Cuenta:* {target_account['nombre']}",
                     parse_mode=ParseMode.MARKDOWN
@@ -255,6 +350,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"✅ *Gasto Guardado*\n\n"
                 f"📝 {descripcion}\n"
+                f"📂 *Cat:* {categoria['nombre']}\n"
                 f"💲 `{fmt_money(monto)}`\n"
                 f"🏦 {target_account['nombre']}\n"
                 f"📅 {fecha_gasto}",
@@ -266,7 +362,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error guardando.")
 
 # ==========================================
-# 5. LIFESPAN & APP
+# 4. LIFESPAN & APP
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -280,6 +376,7 @@ async def lifespan(app: FastAPI):
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("saldo", reply_balance))
     bot_app.add_handler(CommandHandler("ayuda", help_command))
+    bot_app.add_handler(CommandHandler("deshacer", undo_last)) # NUEVO COMANDO
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     await bot_app.initialize()
@@ -289,7 +386,7 @@ async def lifespan(app: FastAPI):
     
     await bot_app.start()
     await bot_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    logger.info("🤖 Bot con Botones iniciado!")
+    logger.info("🤖 Bot con Botones + Smart Cat + Undo iniciado!")
     
     yield
     
