@@ -2,15 +2,21 @@ import os
 import re
 import asyncio
 import logging
+import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from dateutil.relativedelta import relativedelta
+import io
 
 from fastapi import FastAPI
 from supabase import create_client
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+
+# --- IMPORTANTE: Librería de IA ---
+import google.generativeai as genai
+from PIL import Image
 
 # ==========================================
 # 1. CONFIGURACIÓN
@@ -19,8 +25,18 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_SECRET") or os.environ.get("TELEGRAM_TOKEN")
 ALLOWED_USER_ID = os.environ.get("ALLOWED_USER_ID")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") # Nueva Variable
 
+# Configurar Supabase
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Configurar Gemini (IA)
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    # Usamos Gemini 1.5 Flash que es rápido y barato/gratis
+    model = genai.GenerativeModel('gemini-1.5-flash')
+else:
+    model = None
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -45,45 +61,24 @@ def get_account_by_name(name):
         return cuentas[0] if cuentas else None
     except: return None
 
-def get_base_salary():
-    """Busca el sueldo base en la tabla configuracion."""
-    try:
-        res = supabase.table("configuracion").select("valor").eq("clave", "sueldo_mensual").execute()
-        if res.data:
-            return float(res.data[0]['valor'])
-        return 0.0
-    except Exception as e:
-        logger.error(f"Error obteniendo sueldo base: {e}")
-        return 0.0
-
-# --- NUEVA FUNCIÓN: Categorización Inteligente ---
 def get_smart_category(description):
-    """
-    Busca palabras clave en la descripción y devuelve la categoría correspondiente.
-    Si no encuentra coincidencia, devuelve 'General'.
-    """
+    """Categorización inteligente por texto."""
     text = description.lower()
-    
-    # Diccionario de palabras clave -> Nombre de Categoría (tal cual está en tu DB)
-    # Asegúrate que las 'Keys' (Transporte, Supermercado) coincidan con los nombres en tu tabla 'categorias'
     keywords_map = {
-        "Comida": ["mcdonald", "burger", "pizza", "restaurante", "cena", "almuerzo", "delivery", "pedidosya", "rappi", "cafe", "starbucks"],
-        "Supermercado": ["coto", "dia", "jumbo", "carrefour", "super", "chino", "vea", "chango", "disco", "carniceria", "verduleria"],
+        "Comida": ["mcdonald", "burger", "pizza", "restaurante", "cena", "almuerzo", "delivery", "pedidosya", "rappi", "cafe", "starbucks", "bar", "confiteria"],
+        "Supermercado": ["coto", "dia", "jumbo", "carrefour", "super", "chino", "vea", "chango", "disco", "carniceria", "verduleria", "market", "almacen"],
         "Transporte": ["uber", "taxi", "nafta", "cabify", "sube", "tren", "bondi", "colectivo", "peaje", "estacionamiento", "shell", "ypf", "axion"],
         "Servicios": ["luz", "gas", "internet", "celular", "claro", "personal", "movistar", "flow", "cable", "edenor", "edesur", "metrogas"],
         "Salud": ["farmacia", "medico", "doctor", "remedios", "obra social", "dentista"],
-        "Salidas": ["cine", "bar", "boliche", "teatro", "entrada", "recital"],
+        "Salidas": ["cine", "boliche", "teatro", "entrada", "recital"],
         "Ropa": ["zapatillas", "remera", "pantalon", "nike", "adidas", "zara", "shopping"]
     }
 
     try:
-        # 1. Traer todas las categorías de la DB
         res = supabase.table("categorias").select("*").execute()
         all_cats = res.data or []
-        
-        target_cat_name = "General" # Default
+        target_cat_name = "General"
 
-        # 2. Buscar coincidencias
         found = False
         for cat_name, terms in keywords_map.items():
             for term in terms:
@@ -93,23 +88,22 @@ def get_smart_category(description):
                     break
             if found: break
         
-        # 3. Buscar el ID de la categoría detectada (o General)
-        # Intentamos buscar la categoría detectada
         for cat in all_cats:
             if target_cat_name.lower() in cat['nombre'].lower():
                 return cat
         
-        # Si la categoría detectada (ej: Transporte) no existe en la DB, buscamos General
+        # Fallback a General
         for cat in all_cats:
-            if "general" in cat['nombre'].lower() or "varios" in cat['nombre'].lower():
-                return cat
-                
-        # Fallback final: devolver la primera que encuentre
+            if "general" in cat['nombre'].lower(): return cat
         return all_cats[0] if all_cats else None
+    except: return None
 
-    except Exception as e:
-        logger.error(f"Error detectando categoría: {e}")
-        return None
+def get_base_salary():
+    try:
+        res = supabase.table("configuracion").select("valor").eq("clave", "sueldo_mensual").execute()
+        if res.data: return float(res.data[0]['valor'])
+        return 0.0
+    except: return 0.0
 
 def get_monthly_balance():
     try:
@@ -119,11 +113,8 @@ def get_monthly_balance():
         
         sueldo_base = get_base_salary()
 
-        res = supabase.table("movimientos")\
-            .select("tipo, monto")\
-            .gte("fecha", str(first_day))\
-            .lte("fecha", str(last_day))\
-            .execute()
+        res = supabase.table("movimientos").select("tipo, monto")\
+            .gte("fecha", str(first_day)).lte("fecha", str(last_day)).execute()
         
         data = res.data or []
         ingresos_registrados = sum(d['monto'] for d in data if d['tipo'] == 'INGRESO')
@@ -132,8 +123,41 @@ def get_monthly_balance():
         total_ingresos = ingresos_registrados if ingresos_registrados > 0 else sueldo_base
         return total_ingresos, gastos
     except Exception as e:
-        logger.error(f"❌ Error calculando balance: {e}")
+        logger.error(f"Error balance: {e}")
         return 0, 0
+
+# --- NUEVA FUNCIÓN: PROCESAR IMAGEN CON GEMINI ---
+async def analyze_receipt_image(image_bytes):
+    if not model:
+        return None
+    
+    try:
+        # Prompt para la IA
+        prompt = """
+        Analiza esta imagen de un ticket o comprobante de pago.
+        Extrae la siguiente información en formato JSON puro (sin markdown):
+        {
+            "monto": float (el total pagado),
+            "descripcion": string (nombre del comercio o resumen corto),
+            "fecha": string (formato YYYY-MM-DD, si no hay fecha usa hoy)
+        }
+        Si no encuentras el comercio, pon "Gasto Ticket".
+        Si no encuentras la fecha, usa la fecha de hoy.
+        Solo devuelve el JSON.
+        """
+        
+        # Abrir imagen desde memoria
+        img = Image.open(io.BytesIO(image_bytes))
+        
+        # Llamar a Gemini
+        response = await asyncio.to_thread(model.generate_content, [prompt, img])
+        text_resp = response.text.replace('```json', '').replace('```', '').strip()
+        
+        data = json.loads(text_resp)
+        return data
+    except Exception as e:
+        logger.error(f"Error Gemini: {e}")
+        return None
 
 # ==========================================
 # 3. HANDLERS
@@ -162,7 +186,7 @@ async def show_menu(update: Update):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Bot Finanzas Pro*\n\n"
-        "Escribe un gasto (ej: `1500 Cena`) o usa los botones.",
+        "Escribe un gasto (`1500 Cena`), mándame una **FOTO** 📸 de un ticket, o usa los botones.",
         parse_mode=ParseMode.MARKDOWN
     )
     await show_menu(update)
@@ -170,98 +194,131 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "💡 *Guía Rápida:*\n\n"
-        "1️⃣ *Carga Simple:* `1500 Super`\n"
+        "📸 *Fotos:* Mándame foto de un ticket y lo cargo solo.\n"
+        "1️⃣ *Texto:* `1500 Super`\n"
         "2️⃣ *Fecha:* `50000 Alquiler 2026-04-01`\n"
         "3️⃣ *Tarjeta:* `25000 Nike Visa`\n"
-        "4️⃣ *Deshacer:* Usa /deshacer para borrar el último.\n\n"
-        "✨ *Auto-Categorías:* Si escribes 'Uber', 'Coto', 'Farmacia', etc., lo detecto solo."
+        "4️⃣ *Deshacer:* Usa /deshacer para borrar el último.\n"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-# --- NUEVO COMANDO: DESHACER ---
 async def undo_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # 1. Buscar último movimiento normal
-        last_mov = supabase.table("movimientos")\
-            .select("*").eq("source", "telegram_bot")\
-            .order("created_at", desc=True).limit(1).execute()
-        
-        # 2. Buscar última compra tarjeta
-        last_card = supabase.table("compras_tarjeta")\
-            .select("*").eq("source", "telegram_bot")\
-            .order("created_at", desc=True).limit(1).execute()
+        last_mov = supabase.table("movimientos").select("*").eq("source", "telegram_bot").order("created_at", desc=True).limit(1).execute()
+        last_card = supabase.table("compras_tarjeta").select("*").eq("source", "telegram_bot").order("created_at", desc=True).limit(1).execute()
         
         mov_data = last_mov.data[0] if last_mov.data else None
         card_data = last_card.data[0] if last_card.data else None
         
         to_delete = None
         table_name = ""
-        type_desc = ""
-
-        # 3. Comparar fechas para ver cuál es más reciente
+        
         if mov_data and card_data:
             t_mov = datetime.fromisoformat(mov_data['created_at'].replace('Z', '+00:00'))
             t_card = datetime.fromisoformat(card_data['created_at'].replace('Z', '+00:00'))
             if t_mov > t_card:
-                to_delete = mov_data
-                table_name = "movimientos"
-                type_desc = "Gasto"
+                to_delete = mov_data; table_name = "movimientos"
             else:
-                to_delete = card_data
-                table_name = "compras_tarjeta"
-                type_desc = "Compra Tarjeta"
-        elif mov_data:
-            to_delete = mov_data
-            table_name = "movimientos"
-            type_desc = "Gasto"
-        elif card_data:
-            to_delete = card_data
-            table_name = "compras_tarjeta"
-            type_desc = "Compra Tarjeta"
+                to_delete = card_data; table_name = "compras_tarjeta"
+        elif mov_data: to_delete = mov_data; table_name = "movimientos"
+        elif card_data: to_delete = card_data; table_name = "compras_tarjeta"
 
-        # 4. Borrar
         if to_delete:
-            desc = to_delete.get('descripcion', 'Sin descripción')
+            desc = to_delete.get('descripcion', '-')
             monto = to_delete.get('monto') or to_delete.get('monto_total')
-            
-            # Si es tarjeta, primero borramos las cuotas asociadas (por seguridad)
             if table_name == "compras_tarjeta":
                 supabase.table("cuotas_tarjeta").delete().eq("compra_id", to_delete['id']).execute()
-
             supabase.table(table_name).delete().eq("id", to_delete['id']).execute()
-            
-            await update.message.reply_text(
-                f"🗑️ *Eliminado Último Registro:*\n"
-                f"{type_desc}: {desc} (${monto})",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            await update.message.reply_text(f"🗑️ *Eliminado:* {desc} (${monto})", parse_mode=ParseMode.MARKDOWN)
         else:
-            await update.message.reply_text("🤷‍♂️ No encontré movimientos recientes cargados por el bot para borrar.")
-
+            await update.message.reply_text("🤷‍♂️ Nada reciente para borrar.")
     except Exception as e:
         logger.error(f"Error undo: {e}")
-        await update.message.reply_text(f"❌ Error al deshacer: {e}")
+        await update.message.reply_text("❌ Error al deshacer.")
+
+# --- HANDLER PARA FOTOS ---
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Seguridad
+    if ALLOWED_USER_ID and str(update.effective_user.id) != str(ALLOWED_USER_ID):
+        return
+
+    if not model:
+        await update.message.reply_text("⚠️ La IA no está configurada (falta GEMINI_API_KEY).")
+        return
+
+    status_msg = await update.message.reply_text("👀 Analizando ticket con IA...")
+    
+    try:
+        # 1. Descargar foto
+        photo_file = await update.message.photo[-1].get_file()
+        img_bytes = await photo_file.download_as_bytearray()
+        
+        # 2. Analizar con Gemini
+        data = await analyze_receipt_image(img_bytes)
+        
+        if not data:
+            await status_msg.edit_text("❌ No pude leer el ticket.")
+            return
+            
+        monto = float(data.get("monto", 0))
+        descripcion = data.get("descripcion", "Gasto Foto")
+        fecha_str = data.get("fecha")
+        
+        # Lógica de guardado estándar
+        fecha_gasto = date.today()
+        if fecha_str:
+            try: fecha_gasto = datetime.strptime(fecha_str, "%Y-%m-%d").date()
+            except: pass
+
+        # Cuenta y Categoría
+        target_account = get_account_by_name("Efectivo") # Por defecto efectivo en fotos
+        categoria = get_smart_category(descripcion)
+        
+        if not target_account or not categoria:
+            await status_msg.edit_text("❌ Error config DB.")
+            return
+
+        # Guardar (Asumimos Gasto normal para fotos por ahora)
+        supabase.table("movimientos").insert({
+            "fecha": str(fecha_gasto),
+            "monto": monto,
+            "descripcion": descripcion,
+            "cuenta_id": target_account['id'],
+            "categoria_id": categoria['id'],
+            "tipo": "GASTO",
+            "source": "telegram_bot"
+        }).execute()
+        
+        await status_msg.edit_text(
+            f"✅ *Ticket Procesado*\n\n"
+            f"📝 {descripcion}\n"
+            f"💲 `{fmt_money(monto)}`\n"
+            f"📂 {categoria['nombre']}\n"
+            f"📅 {fecha_gasto}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    except Exception as e:
+        logger.error(f"Error foto: {e}")
+        await status_msg.edit_text("❌ Error procesando la imagen.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    if ALLOWED_USER_ID and user_id != str(ALLOWED_USER_ID):
+    # Seguridad
+    if ALLOWED_USER_ID and str(update.effective_user.id) != str(ALLOWED_USER_ID):
         await update.message.reply_text("⛔ No autorizado.")
         return
 
     text = update.message.text
 
     if text == "💰 Balance Mes":
-        await reply_balance(update, context)
-        return
+        await reply_balance(update, context); return
     if text == "❓ Ayuda":
-        await help_command(update, context)
-        return
+        await help_command(update, context); return
 
-    # --- PROCESAR GASTO ---
+    # Parseo Texto
     match_monto = re.search(r'(\d+([.,]\d{1,2})?)', text)
     if not match_monto:
-        await update.message.reply_text("🤷‍♂️ No entendí. Escribe el monto primero (ej: `2500 Taxi`).", parse_mode=ParseMode.MARKDOWN)
-        return
+        await update.message.reply_text("🤷‍♂️ Escribe el monto primero (ej: `2500 Taxi`).", parse_mode=ParseMode.MARKDOWN); return
 
     monto = float(match_monto.group(1).replace(',', '.'))
     clean_text = text.replace(match_monto.group(0), '').strip()
@@ -275,91 +332,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clean_text = clean_text.replace(fecha_str, '').strip()
         except: pass
 
-    # 1. Detectar Cuenta
+    # Cuenta
     target_account = None
     try:
-        all_accounts_res = supabase.table("cuentas").select("nombre, id, tipo").execute()
-        all_accounts = all_accounts_res.data or []
-    except: all_accounts = []
-    
-    words = clean_text.split()
-    desc_words = []
-    
-    for word in words:
-        is_acc_name = False
-        if all_accounts:
+        all_accounts = supabase.table("cuentas").select("nombre, id, tipo").execute().data or []
+        desc_words = []
+        for word in clean_text.split():
+            is_acc = False
             for acc in all_accounts:
                 if word.lower() in acc['nombre'].lower():
-                    target_account = acc
-                    is_acc_name = True
-                    break
-        if not is_acc_name:
-            desc_words.append(word)
+                    target_account = acc; is_acc = True; break
+            if not is_acc: desc_words.append(word)
+    except: desc_words = clean_text.split()
     
-    if not target_account:
-        target_account = get_account_by_name("Efectivo")
-
+    if not target_account: target_account = get_account_by_name("Efectivo")
     descripcion = " ".join(desc_words) or "Gasto Telegram"
     
-    # 2. Detectar Categoría (NUEVA LÓGICA)
+    # Categoría
     categoria = get_smart_category(descripcion)
 
     if not target_account or not categoria:
-        await update.message.reply_text("❌ Error: Faltan cuentas/categorías en DB.")
+        await update.message.reply_text("❌ Error DB.")
         return
 
     try:
         if target_account['tipo'] == 'CREDITO':
             compra = supabase.table("compras_tarjeta").insert({
-                "fecha_compra": str(fecha_gasto),
-                "monto_total": monto,
-                "cuotas_total": 1,
-                "cuenta_id": target_account['id'],
-                "categoria_id": categoria['id'],
-                "descripcion": descripcion,
-                "source": "telegram_bot",
-                "merchant": descripcion
+                "fecha_compra": str(fecha_gasto), "monto_total": monto, "cuotas_total": 1,
+                "cuenta_id": target_account['id'], "categoria_id": categoria['id'],
+                "descripcion": descripcion, "source": "telegram_bot", "merchant": descripcion
             }).execute()
-            
             if compra.data:
                 supabase.table("cuotas_tarjeta").insert({
-                    "compra_id": compra.data[0]['id'],
-                    "nro_cuota": 1,
-                    "fecha_cuota": str(fecha_gasto),
-                    "monto_cuota": monto,
-                    "estado": "pendiente"
+                    "compra_id": compra.data[0]['id'], "nro_cuota": 1, "fecha_cuota": str(fecha_gasto),
+                    "monto_cuota": monto, "estado": "pendiente"
                 }).execute()
-                await update.message.reply_text(
-                    f"💳 *Tarjeta Detectada*\n\n"
-                    f"📝 *Desc:* {descripcion}\n"
-                    f"📂 *Cat:* {categoria['nombre']}\n"
-                    f"💲 *Monto:* `{fmt_money(monto)}`\n"
-                    f"🏦 *Cuenta:* {target_account['nombre']}",
-                    parse_mode=ParseMode.MARKDOWN
-                )
+                await update.message.reply_text(f"💳 *Tarjeta*\n📝 {descripcion}\n💲 `{fmt_money(monto)}`\n📂 {categoria['nombre']}", parse_mode=ParseMode.MARKDOWN)
         else:
             supabase.table("movimientos").insert({
-                "fecha": str(fecha_gasto),
-                "monto": monto,
-                "descripcion": descripcion,
-                "cuenta_id": target_account['id'],
-                "categoria_id": categoria['id'],
-                "tipo": "GASTO",
-                "source": "telegram_bot"
+                "fecha": str(fecha_gasto), "monto": monto, "descripcion": descripcion,
+                "cuenta_id": target_account['id'], "categoria_id": categoria['id'],
+                "tipo": "GASTO", "source": "telegram_bot"
             }).execute()
-            await update.message.reply_text(
-                f"✅ *Gasto Guardado*\n\n"
-                f"📝 {descripcion}\n"
-                f"📂 *Cat:* {categoria['nombre']}\n"
-                f"💲 `{fmt_money(monto)}`\n"
-                f"🏦 {target_account['nombre']}\n"
-                f"📅 {fecha_gasto}",
-                parse_mode=ParseMode.MARKDOWN
-            )
-
+            await update.message.reply_text(f"✅ *Guardado*\n📝 {descripcion}\n💲 `{fmt_money(monto)}`\n📂 {categoria['nombre']}", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        logger.error(f"Error DB: {e}")
-        await update.message.reply_text("❌ Error guardando.")
+        logger.error(f"Error DB: {e}"); await update.message.reply_text("❌ Error guardando.")
 
 # ==========================================
 # 4. LIFESPAN & APP
@@ -368,25 +385,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def lifespan(app: FastAPI):
     if not TELEGRAM_TOKEN:
         logger.error("Falta TELEGRAM_TOKEN")
-        yield
-        return
+        yield; return
 
     bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("saldo", reply_balance))
     bot_app.add_handler(CommandHandler("ayuda", help_command))
-    bot_app.add_handler(CommandHandler("deshacer", undo_last)) # NUEVO COMANDO
+    bot_app.add_handler(CommandHandler("deshacer", undo_last))
+    
+    # Handler para fotos
+    bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    # Handler para texto
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     await bot_app.initialize()
-    try:
-        await bot_app.bot.delete_webhook(drop_pending_updates=True)
+    try: await bot_app.bot.delete_webhook(drop_pending_updates=True)
     except: pass
     
     await bot_app.start()
     await bot_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    logger.info("🤖 Bot con Botones + Smart Cat + Undo iniciado!")
+    logger.info("🤖 Bot con IA (Vision) iniciado!")
     
     yield
     
@@ -397,5 +416,4 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
-def health_check():
-    return {"status": "ok", "bot": "interactive"}
+def health_check(): return {"status": "ok", "bot": "ai_enabled"}
