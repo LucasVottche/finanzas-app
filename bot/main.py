@@ -6,17 +6,21 @@ import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from dateutil.relativedelta import relativedelta
-import io
 
 from fastapi import FastAPI
 from supabase import create_client
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.constants import ParseMode
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+from telegram.constants import ParseMode, ChatAction
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    CommandHandler,
+    MessageHandler,
+    filters
+)
 
-# --- IMPORTANTE: Librería de IA ---
+# IA
 import google.generativeai as genai
-from PIL import Image
 
 # ==========================================
 # 1. CONFIGURACIÓN
@@ -25,16 +29,18 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_SECRET") or os.environ.get("TELEGRAM_TOKEN")
 ALLOWED_USER_ID = os.environ.get("ALLOWED_USER_ID")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") # Nueva Variable
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Configurar Supabase
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Configurar Gemini (IA)
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    # Usamos Gemini 1.5 Flash que es rápido y barato/gratis
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # Usamos configuración para forzar respuesta JSON
+    generation_config = {
+        "temperature": 0.2,
+        "response_mime_type": "application/json",
+    }
+    model = genai.GenerativeModel('gemini-1.5-flash', generation_config=generation_config)
 else:
     model = None
 
@@ -45,33 +51,40 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==========================================
-# 2. FUNCIONES DE AYUDA
+# 2. FUNCIONES DE AYUDA (LOGICA DE NEGOCIO)
 # ==========================================
 def fmt_money(val):
     return f"${val:,.0f}".replace(",", ".")
 
 def get_account_by_name(name):
     try:
+        # Busca coincidencia exacta o parcial
         res = supabase.table("cuentas").select("*").execute()
         cuentas = res.data or []
+        
+        # 1. Búsqueda por nombre específico
         for acc in cuentas:
-            if name.lower() in acc['nombre'].lower(): return acc
+            if name and name.lower() in acc['nombre'].lower(): return acc
+        
+        # 2. Búsqueda de "Efectivo" como fallback
         for acc in cuentas:
             if "efectivo" in acc['nombre'].lower(): return acc
+            
+        # 3. Retorna la primera cuenta si no hay match
         return cuentas[0] if cuentas else None
     except: return None
 
 def get_smart_category(description):
-    """Categorización inteligente por texto."""
     text = description.lower()
     keywords_map = {
-        "Comida": ["mcdonald", "burger", "pizza", "restaurante", "cena", "almuerzo", "delivery", "pedidosya", "rappi", "cafe", "starbucks", "bar", "confiteria"],
-        "Supermercado": ["coto", "dia", "jumbo", "carrefour", "super", "chino", "vea", "chango", "disco", "carniceria", "verduleria", "market", "almacen"],
+        "Comida": ["mcdonald", "burger", "pizza", "restaurante", "cena", "almuerzo", "delivery", "pedidosya", "rappi", "cafe", "starbucks", "bar", "comidas", "bebidas", "market", "kiosco"],
+        "Supermercado": ["coto", "dia", "jumbo", "carrefour", "super", "chino", "vea", "chango", "disco", "carniceria", "verduleria", "fruteria"],
         "Transporte": ["uber", "taxi", "nafta", "cabify", "sube", "tren", "bondi", "colectivo", "peaje", "estacionamiento", "shell", "ypf", "axion"],
-        "Servicios": ["luz", "gas", "internet", "celular", "claro", "personal", "movistar", "flow", "cable", "edenor", "edesur", "metrogas"],
-        "Salud": ["farmacia", "medico", "doctor", "remedios", "obra social", "dentista"],
-        "Salidas": ["cine", "boliche", "teatro", "entrada", "recital"],
-        "Ropa": ["zapatillas", "remera", "pantalon", "nike", "adidas", "zara", "shopping"]
+        "Servicios": ["luz", "gas", "internet", "celular", "claro", "personal", "movistar", "flow", "cable", "edenor", "edesur", "metrogas", "abl"],
+        "Salud": ["farmacia", "medico", "doctor", "remedios", "obra social", "dentista", "swiss", "osde"],
+        "Salidas": ["cine", "boliche", "teatro", "entrada", "recital", "juego"],
+        "Ropa": ["zapatillas", "remera", "pantalon", "nike", "adidas", "zara", "shopping", "indumentaria"],
+        "Transferencias": ["transferencia", "envio", "pago a", "destinatario"]
     }
 
     try:
@@ -88,11 +101,11 @@ def get_smart_category(description):
                     break
             if found: break
         
+        # Buscar la categoría en la DB
         for cat in all_cats:
-            if target_cat_name.lower() in cat['nombre'].lower():
-                return cat
+            if target_cat_name.lower() in cat['nombre'].lower(): return cat
         
-        # Fallback a General
+        # Fallback a "General" o la primera
         for cat in all_cats:
             if "general" in cat['nombre'].lower(): return cat
         return all_cats[0] if all_cats else None
@@ -112,51 +125,42 @@ def get_monthly_balance():
         last_day = first_day + relativedelta(months=1) - timedelta(days=1)
         
         sueldo_base = get_base_salary()
-
-        res = supabase.table("movimientos").select("tipo, monto")\
-            .gte("fecha", str(first_day)).lte("fecha", str(last_day)).execute()
         
+        res = supabase.table("movimientos").select("tipo, monto").gte("fecha", str(first_day)).lte("fecha", str(last_day)).execute()
         data = res.data or []
-        ingresos_registrados = sum(d['monto'] for d in data if d['tipo'] == 'INGRESO')
-        gastos = sum(d['monto'] for d in data if d['tipo'] in ['GASTO', 'COMPRA_TARJETA'])
         
-        total_ingresos = ingresos_registrados if ingresos_registrados > 0 else sueldo_base
-        return total_ingresos, gastos
-    except Exception as e:
-        logger.error(f"Error balance: {e}")
-        return 0, 0
+        ing = sum(d['monto'] for d in data if d['tipo'] == 'INGRESO')
+        gas = sum(d['monto'] for d in data if d['tipo'] in ['GASTO', 'COMPRA_TARJETA'])
+        
+        return (ing if ing > 0 else sueldo_base), gas
+    except: return 0, 0
 
-# --- NUEVA FUNCIÓN: PROCESAR IMAGEN CON GEMINI ---
-async def analyze_receipt_image(image_bytes):
-    if not model:
-        return None
-    
+# --- FUNCIÓN IA MULTIMEDIA (PDF/FOTO) ---
+async def analyze_media(file_bytes, mime_type):
+    if not model: return None
     try:
-        # Prompt para la IA
+        # Prompt mejorado para extracción financiera precisa
         prompt = """
-        Analiza esta imagen de un ticket o comprobante de pago.
-        Extrae la siguiente información en formato JSON puro (sin markdown):
-        {
-            "monto": float (el total pagado),
-            "descripcion": string (nombre del comercio o resumen corto),
-            "fecha": string (formato YYYY-MM-DD, si no hay fecha usa hoy)
-        }
-        Si no encuentras el comercio, pon "Gasto Ticket".
-        Si no encuentras la fecha, usa la fecha de hoy.
-        Solo devuelve el JSON.
+        Eres un asistente contable experto. Analiza este comprobante (Ticket, Factura o Transferencia).
+        Extrae la siguiente información en formato JSON estricto:
+        
+        1. "monto": El total final a pagar (número flotante, usa punto decimal). Busca "Total", "Importe", "Monto". Ignora subtotales.
+        2. "descripcion": El nombre del comercio o motivo (string corto). Si es transferencia, pon "Transferencia a [Nombre]".
+        3. "fecha": La fecha del comprobante en formato "YYYY-MM-DD". Si no hay fecha visible, usa null.
+        
+        Ejemplo de salida deseada:
+        {"monto": 1250.50, "descripcion": "Supermercado Coto", "fecha": "2024-02-20"}
         """
         
-        # Abrir imagen desde memoria
-        img = Image.open(io.BytesIO(image_bytes))
+        part = {"mime_type": mime_type, "data": file_bytes}
         
-        # Llamar a Gemini
-        response = await asyncio.to_thread(model.generate_content, [prompt, img])
-        text_resp = response.text.replace('```json', '').replace('```', '').strip()
+        # Llamada a Gemini
+        response = await asyncio.to_thread(model.generate_content, [prompt, part])
         
-        data = json.loads(text_resp)
-        return data
+        # Al usar response_mime_type='application/json', el texto ya debería ser JSON válido
+        return json.loads(response.text)
     except Exception as e:
-        logger.error(f"Error Gemini: {e}")
+        logger.error(f"Error IA: {e}")
         return None
 
 # ==========================================
@@ -165,255 +169,272 @@ async def analyze_receipt_image(image_bytes):
 
 async def reply_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ing, gas = get_monthly_balance()
-    neto = ing - gas
-    meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-    mes_nombre = meses[date.today().month - 1]
-
+    mes_nombre = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"][date.today().month - 1]
+    
     await update.message.reply_text(
-        f"📅 *Balance {mes_nombre}*\n\n"
-        f"📥 Ingresos: `{fmt_money(ing)}`\n"
-        f"🛒 Consumo:  `{fmt_money(gas)}`\n"
-        f"-------------------\n"
-        f"💵 *Neto: {fmt_money(neto)}*",
+        f"📅 *Balance {mes_nombre}*\n\n📥 Ingresos: `{fmt_money(ing)}`\n🛒 Consumo:  `{fmt_money(gas)}`\n-------------------\n💵 *Neto: {fmt_money(ing - gas)}*",
         parse_mode=ParseMode.MARKDOWN
     )
 
 async def show_menu(update: Update):
-    keyboard = [[KeyboardButton("💰 Balance Mes"), KeyboardButton("❓ Ayuda")]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("¿Qué quieres hacer?", reply_markup=reply_markup)
+    kb = [[KeyboardButton("💰 Balance Mes"), KeyboardButton("❓ Ayuda")]]
+    await update.message.reply_text("¿Qué quieres hacer?", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 *Bot Finanzas Pro*\n\n"
-        "Escribe un gasto (`1500 Cena`), mándame una **FOTO** 📸 de un ticket, o usa los botones.",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    await update.message.reply_text("👋 *Bot Finanzas Pro*\nEscribe gastos (ej: `5000 gym`), manda fotos/PDFs o usa el menú.", parse_mode=ParseMode.MARKDOWN)
     await show_menu(update)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "💡 *Guía Rápida:*\n\n"
-        "📸 *Fotos:* Mándame foto de un ticket y lo cargo solo.\n"
-        "1️⃣ *Texto:* `1500 Super`\n"
-        "2️⃣ *Fecha:* `50000 Alquiler 2026-04-01`\n"
-        "3️⃣ *Tarjeta:* `25000 Nike Visa`\n"
-        "4️⃣ *Deshacer:* Usa /deshacer para borrar el último.\n"
+    await update.message.reply_text(
+        "💡 *Ayuda:*\n📸 Manda **Fotos** o **PDFs** de comprobantes.\n✍️ Escribe: `1500 Super`\n↩️ `/deshacer` para borrar último.",
+        parse_mode=ParseMode.MARKDOWN
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 async def undo_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         last_mov = supabase.table("movimientos").select("*").eq("source", "telegram_bot").order("created_at", desc=True).limit(1).execute()
         last_card = supabase.table("compras_tarjeta").select("*").eq("source", "telegram_bot").order("created_at", desc=True).limit(1).execute()
         
-        mov_data = last_mov.data[0] if last_mov.data else None
-        card_data = last_card.data[0] if last_card.data else None
+        m_d = last_mov.data[0] if last_mov.data else None
+        c_d = last_card.data[0] if last_card.data else None
         
-        to_delete = None
-        table_name = ""
+        target = None
+        table = ""
         
-        if mov_data and card_data:
-            t_mov = datetime.fromisoformat(mov_data['created_at'].replace('Z', '+00:00'))
-            t_card = datetime.fromisoformat(card_data['created_at'].replace('Z', '+00:00'))
-            if t_mov > t_card:
-                to_delete = mov_data; table_name = "movimientos"
-            else:
-                to_delete = card_data; table_name = "compras_tarjeta"
-        elif mov_data: to_delete = mov_data; table_name = "movimientos"
-        elif card_data: to_delete = card_data; table_name = "compras_tarjeta"
+        if m_d and c_d:
+            tm = datetime.fromisoformat(m_d['created_at'].replace('Z', '+00:00'))
+            tc = datetime.fromisoformat(c_d['created_at'].replace('Z', '+00:00'))
+            if tm > tc: target = m_d; table = "movimientos"
+            else: target = c_d; table = "compras_tarjeta"
+        elif m_d: target = m_d; table = "movimientos"
+        elif c_d: target = c_d; table = "compras_tarjeta"
 
-        if to_delete:
-            desc = to_delete.get('descripcion', '-')
-            monto = to_delete.get('monto') or to_delete.get('monto_total')
-            if table_name == "compras_tarjeta":
-                supabase.table("cuotas_tarjeta").delete().eq("compra_id", to_delete['id']).execute()
-            supabase.table(table_name).delete().eq("id", to_delete['id']).execute()
-            await update.message.reply_text(f"🗑️ *Eliminado:* {desc} (${monto})", parse_mode=ParseMode.MARKDOWN)
+        if target:
+            if table == "compras_tarjeta":
+                supabase.table("cuotas_tarjeta").delete().eq("compra_id", target['id']).execute()
+            supabase.table(table).delete().eq("id", target['id']).execute()
+            monto = target.get('monto') or target.get('monto_total')
+            await update.message.reply_text(f"🗑️ Eliminado: {target.get('descripcion')} ({fmt_money(monto)})")
         else:
             await update.message.reply_text("🤷‍♂️ Nada reciente para borrar.")
     except Exception as e:
-        logger.error(f"Error undo: {e}")
+        logger.error(f"Undo error: {e}")
         await update.message.reply_text("❌ Error al deshacer.")
 
-# --- HANDLER PARA FOTOS ---
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Seguridad
-    if ALLOWED_USER_ID and str(update.effective_user.id) != str(ALLOWED_USER_ID):
-        return
+# --- HANDLER UNIFICADO MEJORADO (FOTO Y DOCUMENTO) ---
+async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ALLOWED_USER_ID and str(update.effective_user.id) != str(ALLOWED_USER_ID): return
 
     if not model:
-        await update.message.reply_text("⚠️ La IA no está configurada (falta GEMINI_API_KEY).")
+        await update.message.reply_text("⚠️ Falta configurar GEMINI_API_KEY en variables de entorno.")
         return
 
-    status_msg = await update.message.reply_text("👀 Analizando ticket con IA...")
+    # Indicador visual de "Escribiendo..."
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    status_msg = await update.message.reply_text("👀 Analizando comprobante...")
     
     try:
-        # 1. Descargar foto
-        photo_file = await update.message.photo[-1].get_file()
-        img_bytes = await photo_file.download_as_bytearray()
+        file_obj = None
+        mime = ""
         
-        # 2. Analizar con Gemini
-        data = await analyze_receipt_image(img_bytes)
+        # 1. Detectar si es DOCUMENTO (PDF o Imagen como archivo)
+        if update.message.document:
+            mime = update.message.document.mime_type
+            # Filtramos solo lo que Gemini suele soportar bien
+            if mime not in ["application/pdf", "image/jpeg", "image/png", "image/webp"]:
+                await status_msg.edit_text(f"❌ Formato no soportado ({mime}). Envía PDF o JPG/PNG.")
+                return
+            file_obj = await update.message.document.get_file()
+
+        # 2. Detectar si es FOTO (Comprimida de Telegram)
+        elif update.message.photo:
+            # Telegram manda varias resoluciones, tomamos la última (más grande)
+            file_obj = await update.message.photo[-1].get_file()
+            mime = "image/jpeg"
+        
+        else:
+            await status_msg.edit_text("❌ No se detectó archivo válido.")
+            return
+
+        # Descargar archivo a memoria
+        file_bytes = await file_obj.download_as_bytearray()
+        
+        # --- PROCESAMIENTO IA ---
+        data = await analyze_media(file_bytes, mime)
         
         if not data:
-            await status_msg.edit_text("❌ No pude leer el ticket.")
+            await status_msg.edit_text("❌ La IA no pudo leer el archivo. Intenta con una foto más clara.")
             return
-            
+
         monto = float(data.get("monto", 0))
-        descripcion = data.get("descripcion", "Gasto Foto")
+        desc = data.get("descripcion", "Gasto Archivo")
         fecha_str = data.get("fecha")
         
-        # Lógica de guardado estándar
+        # Validación de fecha
         fecha_gasto = date.today()
         if fecha_str:
-            try: fecha_gasto = datetime.strptime(fecha_str, "%Y-%m-%d").date()
-            except: pass
+            try: 
+                fecha_gasto = datetime.strptime(fecha_str, "%Y-%m-%d").date()
+            except: 
+                # Si falla la fecha, usamos hoy, pero logueamos
+                logger.warning(f"Fecha inválida recibida: {fecha_str}")
+                pass
 
-        # Cuenta y Categoría
-        target_account = get_account_by_name("Efectivo") # Por defecto efectivo en fotos
-        categoria = get_smart_category(descripcion)
+        # Lógica de categorías y cuentas
+        cta = get_account_by_name("Efectivo") 
+        cat = get_smart_category(desc)
         
-        if not target_account or not categoria:
-            await status_msg.edit_text("❌ Error config DB.")
+        if not cta or not cat:
+            await status_msg.edit_text("❌ Error configuración base de datos (Cuentas/Categorías).")
             return
 
-        # Guardar (Asumimos Gasto normal para fotos por ahora)
+        # Inserción en BD
         supabase.table("movimientos").insert({
-            "fecha": str(fecha_gasto),
-            "monto": monto,
-            "descripcion": descripcion,
-            "cuenta_id": target_account['id'],
-            "categoria_id": categoria['id'],
-            "tipo": "GASTO",
+            "fecha": str(fecha_gasto), 
+            "monto": monto, 
+            "descripcion": desc,
+            "cuenta_id": cta['id'], 
+            "categoria_id": cat['id'], 
+            "tipo": "GASTO", 
             "source": "telegram_bot"
         }).execute()
-        
+
         await status_msg.edit_text(
-            f"✅ *Ticket Procesado*\n\n"
-            f"📝 {descripcion}\n"
+            f"✅ *Gasto Registrado*\n"
+            f"📝 {desc}\n"
             f"💲 `{fmt_money(monto)}`\n"
-            f"📂 {categoria['nombre']}\n"
+            f"📂 {cat['nombre']}\n"
             f"📅 {fecha_gasto}",
             parse_mode=ParseMode.MARKDOWN
         )
 
     except Exception as e:
-        logger.error(f"Error foto: {e}")
-        await status_msg.edit_text("❌ Error procesando la imagen.")
+        logger.error(f"File process error: {e}")
+        await status_msg.edit_text("❌ Ocurrió un error procesando el archivo.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Seguridad
-    if ALLOWED_USER_ID and str(update.effective_user.id) != str(ALLOWED_USER_ID):
-        await update.message.reply_text("⛔ No autorizado.")
-        return
-
+    if ALLOWED_USER_ID and str(update.effective_user.id) != str(ALLOWED_USER_ID): return
     text = update.message.text
 
-    if text == "💰 Balance Mes":
-        await reply_balance(update, context); return
-    if text == "❓ Ayuda":
-        await help_command(update, context); return
+    if text == "💰 Balance Mes": await reply_balance(update, context); return
+    if text == "❓ Ayuda": await help_command(update, context); return
 
-    # Parseo Texto
-    match_monto = re.search(r'(\d+([.,]\d{1,2})?)', text)
-    if not match_monto:
-        await update.message.reply_text("🤷‍♂️ Escribe el monto primero (ej: `2500 Taxi`).", parse_mode=ParseMode.MARKDOWN); return
-
-    monto = float(match_monto.group(1).replace(',', '.'))
-    clean_text = text.replace(match_monto.group(0), '').strip()
-    
-    fecha_gasto = date.today()
-    match_date = re.search(r'(\d{4}-\d{2}-\d{2})', clean_text)
-    if match_date:
-        try:
-            fecha_str = match_date.group(1)
-            fecha_gasto = datetime.strptime(fecha_str, "%Y-%m-%d").date()
-            clean_text = clean_text.replace(fecha_str, '').strip()
-        except: pass
-
-    # Cuenta
-    target_account = None
-    try:
-        all_accounts = supabase.table("cuentas").select("nombre, id, tipo").execute().data or []
-        desc_words = []
-        for word in clean_text.split():
-            is_acc = False
-            for acc in all_accounts:
-                if word.lower() in acc['nombre'].lower():
-                    target_account = acc; is_acc = True; break
-            if not is_acc: desc_words.append(word)
-    except: desc_words = clean_text.split()
-    
-    if not target_account: target_account = get_account_by_name("Efectivo")
-    descripcion = " ".join(desc_words) or "Gasto Telegram"
-    
-    # Categoría
-    categoria = get_smart_category(descripcion)
-
-    if not target_account or not categoria:
-        await update.message.reply_text("❌ Error DB.")
+    # Detectar monto con regex (soporta 1000, 1000.50, 1000,50)
+    match = re.search(r'(\d+([.,]\d{1,2})?)', text)
+    if not match: 
+        await update.message.reply_text("🤷‍♂️ No entendí. Escribe primero el monto (ej: '1500 taxi').")
         return
 
+    monto = float(match.group(1).replace(',', '.'))
+    clean_text = text.replace(match.group(0), '').strip()
+    
+    # Detectar fecha manual si el usuario escribe YYYY-MM-DD
+    fecha_gasto = date.today()
+    match_d = re.search(r'(\d{4}-\d{2}-\d{2})', clean_text)
+    if match_d:
+        try:
+            fecha_gasto = datetime.strptime(match_d.group(1), "%Y-%m-%d").date()
+            clean_text = clean_text.replace(match_d.group(1), '').strip()
+        except: pass
+
+    # Detectar Cuenta en el texto
+    acc = None
     try:
-        if target_account['tipo'] == 'CREDITO':
-            compra = supabase.table("compras_tarjeta").insert({
-                "fecha_compra": str(fecha_gasto), "monto_total": monto, "cuotas_total": 1,
-                "cuenta_id": target_account['id'], "categoria_id": categoria['id'],
-                "descripcion": descripcion, "source": "telegram_bot", "merchant": descripcion
+        all_acc = supabase.table("cuentas").select("*").execute().data or []
+        words = clean_text.split()
+        desc_w = []
+        for w in words:
+            found = False
+            for a in all_acc:
+                if w.lower() in a['nombre'].lower(): 
+                    acc = a; found = True; break
+            if not found: desc_w.append(w)
+        clean_text = " ".join(desc_w)
+    except: pass
+    
+    if not acc: acc = get_account_by_name("Efectivo")
+    desc = clean_text or "Gasto Telegram"
+    cat = get_smart_category(desc)
+
+    try:
+        if acc.get('tipo') == 'CREDITO':
+            c = supabase.table("compras_tarjeta").insert({
+                "fecha_compra": str(fecha_gasto), 
+                "monto_total": monto, 
+                "cuotas_total": 1,
+                "cuenta_id": acc['id'], 
+                "categoria_id": cat['id'], 
+                "descripcion": desc, 
+                "source": "telegram_bot", 
+                "merchant": desc
             }).execute()
-            if compra.data:
+            
+            if c.data:
                 supabase.table("cuotas_tarjeta").insert({
-                    "compra_id": compra.data[0]['id'], "nro_cuota": 1, "fecha_cuota": str(fecha_gasto),
-                    "monto_cuota": monto, "estado": "pendiente"
+                    "compra_id": c.data[0]['id'], 
+                    "nro_cuota": 1, 
+                    "fecha_cuota": str(fecha_gasto), 
+                    "monto_cuota": monto, 
+                    "estado": "pendiente"
                 }).execute()
-                await update.message.reply_text(f"💳 *Tarjeta*\n📝 {descripcion}\n💲 `{fmt_money(monto)}`\n📂 {categoria['nombre']}", parse_mode=ParseMode.MARKDOWN)
+                await update.message.reply_text(f"💳 *Tarjeta Registrada*\n📝 {desc}\n💲 `{fmt_money(monto)}`", parse_mode=ParseMode.MARKDOWN)
         else:
             supabase.table("movimientos").insert({
-                "fecha": str(fecha_gasto), "monto": monto, "descripcion": descripcion,
-                "cuenta_id": target_account['id'], "categoria_id": categoria['id'],
-                "tipo": "GASTO", "source": "telegram_bot"
+                "fecha": str(fecha_gasto), 
+                "monto": monto, 
+                "descripcion": desc,
+                "cuenta_id": acc['id'], 
+                "categoria_id": cat['id'], 
+                "tipo": "GASTO", 
+                "source": "telegram_bot"
             }).execute()
-            await update.message.reply_text(f"✅ *Guardado*\n📝 {descripcion}\n💲 `{fmt_money(monto)}`\n📂 {categoria['nombre']}", parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Error DB: {e}"); await update.message.reply_text("❌ Error guardando.")
+            await update.message.reply_text(f"✅ *Gasto Registrado*\n📝 {desc}\n💲 `{fmt_money(monto)}`", parse_mode=ParseMode.MARKDOWN)
+    except Exception as e: 
+        logger.error(f"DB Error: {e}")
+        await update.message.reply_text("❌ Error guardando en base de datos.")
 
 # ==========================================
-# 4. LIFESPAN & APP
+# 4. LIFESPAN Y ARRANQUE
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not TELEGRAM_TOKEN:
-        logger.error("Falta TELEGRAM_TOKEN")
-        yield; return
-
-    bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        logger.error("No TELEGRAM_TOKEN found")
+        yield
+        return
+        
+    bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(CommandHandler("saldo", reply_balance))
-    bot_app.add_handler(CommandHandler("ayuda", help_command))
-    bot_app.add_handler(CommandHandler("deshacer", undo_last))
+    # Comandos
+    bot.add_handler(CommandHandler("start", start))
+    bot.add_handler(CommandHandler("saldo", reply_balance))
+    bot.add_handler(CommandHandler("ayuda", help_command))
+    bot.add_handler(CommandHandler("deshacer", undo_last))
     
-    # Handler para fotos
-    bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    # Handler para texto
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # --- FILTRO MEJORADO PARA ARCHIVOS ---
+    # Acepta: Fotos comprimidas O Documentos (PDFs, imágenes sin compresión)
+    # Excluye comandos
+    file_filter = (filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND
+    bot.add_handler(MessageHandler(file_filter, handle_files))
     
-    await bot_app.initialize()
-    try: await bot_app.bot.delete_webhook(drop_pending_updates=True)
+    # Texto plano
+    bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    await bot.initialize()
+    try: await bot.bot.delete_webhook(drop_pending_updates=True)
     except: pass
+    await bot.start()
+    await bot.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     
-    await bot_app.start()
-    await bot_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    logger.info("🤖 Bot con IA (Vision) iniciado!")
+    logger.info("🤖 Bot iniciado correctamente")
     
     yield
     
-    await bot_app.updater.stop()
-    await bot_app.stop()
-    await bot_app.shutdown()
+    await bot.updater.stop()
+    await bot.stop()
+    await bot.shutdown()
 
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
-def health_check(): return {"status": "ok", "bot": "ai_enabled"}
+def health(): return {"status": "ok", "mode": "smart-multimedia"}
