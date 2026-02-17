@@ -1297,53 +1297,118 @@ elif "Tarjetas" in menu:
 elif "Ajustes" in menu:
     st.markdown("### ⚙️ Ajustes")
 
-    # sueldo base
+    # --- A. CARGA DE SALDO INICIAL (Lo que pediste) ---
+    st.info("💡 **Tip:** Si no querés cargar tu sueldo manualmente cada mes, configurá el 'Sueldo Base' abajo. Si este mes ya tenés la plata en mano y querés arrancar desde ahí, usá la 'Carga de Saldo Inicial'.")
+
     with st.container(border=True):
-        st.write("Sueldo Base")
-        ns = st.number_input("Neto", value=int(sueldo_base or 0), label_visibility="collapsed")
-        if st.button("Actualizar"):
+        st.markdown("#### 💰 Carga de Saldo Inicial / Dinero Actual")
+        st.caption("Usá esto para ingresar la plata que tenés **hoy** disponible (bancos + efectivo). Al hacer esto, el sistema usará este monto como tu ingreso total del mes en curso y calculará cuánto te queda.")
+        
+        with st.form("saldo_init_form"):
+            c1, c2, c3 = st.columns(3)
+            # Monto disponible hoy
+            m_init = c1.number_input("Monto disponible hoy ($)", min_value=0.0, step=1000.0)
+            # Cuenta donde está la plata
+            cta_init = c2.selectbox("Cuenta Principal", df_cta[df_cta["tipo"]!="CREDITO"]["nombre"].tolist() if not df_cta.empty else [])
+            # Fecha (por defecto hoy)
+            f_init = c3.date_input("Fecha de impacto", date.today())
+            
+            if st.form_submit_button("💾 Guardar Saldo Inicial", type="primary"):
+                if not cta_init:
+                    st.error("Necesitás crear una cuenta (Bancaria o Efectivo) primero.")
+                else:
+                    # Buscamos IDs
+                    id_c = df_cta[df_cta["nombre"] == cta_init]["id"].values[0]
+                    # Buscamos categoría General o Ajuste si existe, sino la primera
+                    cat_nom = "General" 
+                    if not df_cat.empty:
+                        # Intenta buscar una categoria 'Ajuste' o 'Ingreso', sino usa la primera
+                        id_cat = df_cat.iloc[0]["id"] 
+                        for _, rowcat in df_cat.iterrows():
+                            if "ajuste" in str(rowcat["nombre"]).lower():
+                                id_cat = rowcat["id"]; break
+                            if "general" in str(rowcat["nombre"]).lower():
+                                id_cat = rowcat["id"]
+                    else:
+                        st.error("No hay categorías.")
+                        st.stop()
+
+                    # Guardamos el movimiento
+                    db_save_mov(
+                        fecha=f_init,
+                        monto=m_init,
+                        desc="Saldo Inicial / Dinero en mano",
+                        cta_id=id_c,
+                        cat_id=id_cat,
+                        tipo="INGRESO", # Importante que sea INGRESO
+                        source="manual"
+                    )
+                    st.toast(f"✅ Saldo de {fmt_ars(m_init)} cargado exitosamente.")
+                    time.sleep(1)
+                    st.rerun()
+
+    st.divider()
+
+    # --- B. SUELDO BASE (Configuración) ---
+    with st.container(border=True):
+        st.markdown("#### 💵 Configuración de Sueldo Base")
+        st.caption("Este monto se usará automáticamente si NO registrás ningún ingreso manual en el mes.")
+        
+        c_sueldo, c_btn = st.columns([3, 1])
+        ns = c_sueldo.number_input("Sueldo Neto Mensual Estimado", value=int(sueldo_base or 0), step=10000)
+        
+        c_btn.write("") # Espaciador vertical
+        c_btn.write("") 
+        if c_btn.button("Actualizar Sueldo"):
             supabase.table("configuracion").upsert({"clave": "sueldo_mensual", "valor": str(int(ns))}).execute()
             invalidate_caches()
-            st.toast("Ok")
-            time.sleep(0.3)
+            st.toast("✅ Sueldo base actualizado")
+            time.sleep(0.5)
             st.rerun()
 
-    # PRESUPUESTOS (NUEVO)
-    st.markdown("#### Presupuestos por Categoría")
-    with st.expander("Configurar Presupuestos"):
-        for _, cat in df_cat.iterrows():
-            with st.container():
-                c1, c2, c3 = st.columns([3, 2, 1])
-                c1.write(f"{cat['icono'] or ''} {cat['nombre']}")
-                current_budget = float(cat.get("presupuesto_mensual") or 0.0)
-                new_budget = c2.number_input("Monto Mensual", value=current_budget, key=f"pres_{cat['id']}")
-                if c3.button("Guardar", key=f"btn_pres_{cat['id']}"):
-                    supabase.table("categorias").update({"presupuesto_mensual": new_budget}).eq("id", cat['id']).execute()
-                    invalidate_caches()
-                    st.toast(f"Presupuesto {cat['nombre']} actualizado")
+    # --- C. PRESUPUESTOS ---
+    st.markdown("#### 🚥 Presupuestos por Categoría")
+    with st.expander("Configurar límites de gasto"):
+        if df_cat.empty:
+            st.warning("No hay categorías cargadas.")
+        else:
+            for _, cat in df_cat.iterrows():
+                with st.container():
+                    c1, c2, c3 = st.columns([3, 2, 1])
+                    c1.write(f"{cat['icono'] or ''} {cat['nombre']}")
+                    current_budget = float(cat.get("presupuesto_mensual") or 0.0)
+                    new_budget = c2.number_input("Tope Mensual", value=current_budget, key=f"pres_{cat['id']}")
+                    if c3.button("Guardar", key=f"btn_pres_{cat['id']}"):
+                        supabase.table("categorias").update({"presupuesto_mensual": new_budget}).eq("id", cat['id']).execute()
+                        invalidate_caches()
+                        st.toast(f"Presupuesto {cat['nombre']} actualizado")
     
-    # fijos
-    st.markdown("#### Fijos")
+    # --- D. FIJOS ---
+    st.markdown("#### 🔄 Gastos Fijos Recurrentes")
     with st.form("add_sus"):
         c1, c2, c3 = st.columns([2, 1, 1])
-        sd = c1.text_input("Desc")
+        sd = c1.text_input("Descripción (ej. Internet, Alquiler)")
         sm = c2.number_input("Monto", min_value=0.0)
-        sc = c3.selectbox("Pago", df_cta["nombre"].tolist() if not df_cta.empty else [])
-        if st.form_submit_button("Agregar"):
-            sidc = df_cta[df_cta["nombre"] == sc]["id"].values[0]
-            # por ahora asignamos categoría default
-            sca = df_cat[df_cat["nombre"].eq("General")]["id"].values[0] if (not df_cat.empty and "General" in df_cat["nombre"].tolist()) else (df_cat.iloc[0]["id"] if not df_cat.empty else None)
-            stipo = "COMPRA_TARJETA" if df_cta[df_cta["nombre"] == sc]["tipo"].values[0] == "CREDITO" else "GASTO"
-            save_suscripcion(sd, sm, sidc, sca, stipo)
-            st.rerun()
+        sc = c3.selectbox("Se debita de", df_cta["nombre"].tolist() if not df_cta.empty else [])
+        if st.form_submit_button("Agregar Fijo"):
+            if sc:
+                sidc = df_cta[df_cta["nombre"] == sc]["id"].values[0]
+                # Categoría default
+                sca = df_cat.iloc[0]["id"] if not df_cat.empty else None
+                # Tipo según cuenta
+                stipo = "COMPRA_TARJETA" if df_cta[df_cta["nombre"] == sc]["tipo"].values[0] == "CREDITO" else "GASTO"
+                save_suscripcion(sd, sm, sidc, sca, stipo)
+                st.rerun()
+            else:
+                st.error("Faltan cuentas.")
 
     df_s = get_suscripciones()
     if not df_s.empty:
         st.dataframe(df_s[["descripcion", "monto", "tipo"]], use_container_width=True, hide_index=True)
-        ds = st.selectbox("Borrar:", ["..."] + df_s["descripcion"].astype(str).tolist())
-        if st.button("Eliminar Fijo") and ds != "...":
+        ds = st.selectbox("Seleccionar para borrar:", ["..."] + df_s["descripcion"].astype(str).tolist())
+        if st.button("Eliminar Fijo seleccionado") and ds != "...":
             did = df_s[df_s["descripcion"] == ds]["id"].values[0]
             delete_suscripcion(did)
             st.rerun()
     else:
-        st.caption("No hay fijos.")
+        st.caption("No hay gastos fijos configurados.")
